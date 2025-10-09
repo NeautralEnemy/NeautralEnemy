@@ -1,10 +1,13 @@
 """Entry point for Colonial Command."""
 from __future__ import annotations
 
-import os
 import sys
 
-import pygame
+try:
+    import pygame
+except ModuleNotFoundError as exc:  # pragma: no cover - friendly runtime guard
+    print("Colonial Command requires pygame. Please install it with 'pip install pygame'.")
+    raise SystemExit(1) from exc
 
 from core.app import App
 from core.saveio import ensure_directories, load_config, save_config
