@@ -13,14 +13,20 @@ class AudioSystem:
     def __init__(self, muted: bool = False) -> None:
         self.muted = muted
         self.cache: Dict[str, pygame.mixer.Sound] = {}
+        self._available = True
         if not pygame.mixer.get_init():
-            pygame.mixer.init()
+            try:
+                pygame.mixer.init()
+            except pygame.error:
+                # Gracefully handle environments without an audio device.
+                self._available = False
+                self.muted = True
 
     def set_muted(self, muted: bool) -> None:
         self.muted = muted
 
     def play(self, name: str, frequency: int = 440, duration: float = 0.15) -> None:
-        if self.muted:
+        if self.muted or not self._available:
             return
         sound = self.cache.get(name)
         if sound is None:
