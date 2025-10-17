@@ -10,6 +10,7 @@ from core import gfx
 from core.state import GameState, SEASONS, Army
 from core.saveio import save_autosave
 from core.ui import Button
+from data.factions import FACTIONS, MAJOR_FACTIONS
 from data.regions import REGIONS
 from data.units import UNITS
 from data.tech import TECH_TREE
@@ -18,6 +19,7 @@ from systems.battle_auto import resolve_auto
 from .base import SceneBase
 
 PLAYER_FACTION = "Britain"
+AMBIENT_FREQUENCIES = (220, 294, 392)
 
 
 class CampaignScene(SceneBase):
@@ -31,6 +33,8 @@ class CampaignScene(SceneBase):
         self.research_index: int = 0
         self._last_event_count: int = 0
         self._entered: bool = False
+        self._highlight_time: float = 0.0
+        self._hotkey_hint = "Hotkeys: H Help | U Undo | G +1000 | F Reveal"
 
     @property
     def state(self) -> GameState:
@@ -39,6 +43,7 @@ class CampaignScene(SceneBase):
 
     def on_enter(self, **kwargs) -> None:
         self._build_buttons()
+        self._sync_move_button_indicator()
         if not self.selected_region and self.state:
             visible = self.state.fog_of_war.get(PLAYER_FACTION, [])
             if visible:
@@ -47,16 +52,45 @@ class CampaignScene(SceneBase):
                 self.selected_region = next(iter(self.state.regions))
         if not self._entered:
             self._last_event_count = 0
-            self.message_log.lines.clear()
+            self.message_log.clear()
             self._entered = True
+        self._highlight_time = 0.0
 
     def _build_buttons(self) -> None:
         self.buttons = [
-            Button(pygame.Rect(8, 150, 60, 18), "Recruit", self._recruit, tooltip="Raise Line Infantry"),
-            Button(pygame.Rect(72, 150, 60, 18), "Build", self._build, tooltip="Improve economy"),
-            Button(pygame.Rect(136, 150, 60, 18), "Research", self._research, tooltip="Queue research"),
-            Button(pygame.Rect(200, 150, 60, 18), "Move", self._prepare_move, tooltip="Move selected army"),
-            Button(pygame.Rect(264, 150, 48, 18), "End", self._end_turn, tooltip="End the turn"),
+            Button(
+                pygame.Rect(8, 150, 60, 18),
+                "Recruit",
+                self._recruit,
+                tooltip=(
+                    "Recruit Line Infantry\n"
+                    f"Cost: 60\nUpkeep: {UNITS['line'].upkeep}/turn"
+                ),
+            ),
+            Button(
+                pygame.Rect(72, 150, 60, 18),
+                "Build",
+                self._build,
+                tooltip="Improve infrastructure\nCost: 80\nBuild Time: Instant",
+            ),
+            Button(
+                pygame.Rect(136, 150, 60, 18),
+                "Research",
+                self._research,
+                tooltip="Queue next technology\nCost: Treasury free\nBuild Time: Multi-turn",
+            ),
+            Button(
+                pygame.Rect(200, 150, 60, 18),
+                "Move",
+                self._prepare_move,
+                tooltip="Select a destination\nMovement Cost: 1 region hop",
+            ),
+            Button(
+                pygame.Rect(264, 150, 48, 18),
+                "End",
+                self._end_turn,
+                tooltip="End the turn and autosave",
+            ),
         ]
 
     def handle_event(self, event: pygame.event.Event) -> None:
@@ -79,7 +113,7 @@ class CampaignScene(SceneBase):
                 for category in TECH_TREE:
                     self.state.factions[PLAYER_FACTION].tech_progress[category] = len(TECH_TREE[category])
                 self.state.add_event("Cheat: research complete")
-            elif event.key == pygame.K_z and self.last_move:
+            elif event.key in (pygame.K_z, pygame.K_u) and self.last_move:
                 army_index, prev = self.last_move
                 if 0 <= army_index < len(self.state.armies):
                     self.state.armies[army_index].location = prev
@@ -109,7 +143,7 @@ class CampaignScene(SceneBase):
             if army.faction == PLAYER_FACTION and army.location == region_key:
                 self.selected_army = army
                 break
-        self.moving = False
+        self._set_moving(False)
 
     def _attempt_move_to_point(self, pos: tuple[int, int]) -> None:
         if not self.selected_army:
@@ -126,7 +160,7 @@ class CampaignScene(SceneBase):
             old_location = self.selected_army.location
             if movement.move_army(self.state, self.selected_army, closest):
                 self.last_move = (self.state.armies.index(self.selected_army), old_location)
-                self.moving = False
+                self._set_moving(False)
                 self.selected_region = closest
                 self._check_for_battle(self.selected_army)
 
@@ -197,26 +231,65 @@ class CampaignScene(SceneBase):
 
     def _prepare_move(self) -> None:
         if self.selected_army:
-            self.moving = True
+            self._set_moving(True)
             self.state.add_event("Select destination")
         else:
+            self._set_moving(False)
             self.state.add_event("No army present")
 
+    def _set_moving(self, enabled: bool) -> None:
+        self.moving = bool(enabled and self.selected_army)
+        if not self.moving:
+            self._highlight_time = 0.0
+        self._sync_move_button_indicator()
+
+    def _sync_move_button_indicator(self) -> None:
+        for button in self.buttons:
+            if button.text.lower().startswith("move"):
+                button.selected = self.moving
+                break
+
     def _end_turn(self) -> None:
+        self._set_moving(False)
+        player_state = self.state.factions[PLAYER_FACTION]
+        income_total = int(
+            sum(reg.income() for reg in self.state.regions_owned_by(PLAYER_FACTION))
+            * player_state.income_modifier()
+        )
+        upkeep_total = self.state.upkeep_cost(PLAYER_FACTION)
+        treasury_before = player_state.treasury
+
         economy.resolve_turn_economy(self.state)
         research.handle_research(self.state)
-        ai.run_ai_turns(self.state, PLAYER_FACTION)
+        if self.app.skip_ai:
+            self.state.add_event("AI moves skipped")
+        else:
+            ai.run_ai_turns(self.state, PLAYER_FACTION)
         self.state.advance_turn()
         movement.reset_movement(self.state)
         save_autosave(self.state)
+        treasury_after = self.state.factions[PLAYER_FACTION].treasury
+        delta = treasury_after - treasury_before
+        self.state.add_event(
+            f"Treasury summary: +{income_total} income -{upkeep_total} upkeep = {delta:+d}"
+        )
         self.state.add_event("Turn ended")
 
     def update(self, dt: float) -> None:
+        self.context.audio.play_loop("campaign_ambient", AMBIENT_FREQUENCIES, duration=3.0, volume=0.12)
+        if self.moving:
+            self._highlight_time += dt
+        else:
+            self._highlight_time = 0.0
         events = self.state.last_events
         if len(events) > self._last_event_count:
             for evt in events[self._last_event_count :]:
                 self.message_log.add(evt)
             self._last_event_count = len(events)
+
+    def on_exit(self) -> None:
+        self.context.audio.stop_loop("campaign_ambient")
+        self._set_moving(False)
 
     def draw(self, surface: pygame.Surface, alpha: float) -> None:
         palette = self.app.palette_id
@@ -224,24 +297,75 @@ class CampaignScene(SceneBase):
         hud = pygame.Rect(4, 4, 312, 40)
         gfx.draw_panel(surface, hud, palette)
         header = f"{PLAYER_FACTION} | Treasury {self.state.factions[PLAYER_FACTION].treasury} | Turn {self.state.turn} {SEASONS[self.state.season_index]} {self.state.year}"
-        gfx.draw_text(surface, header, (hud.x + 4, hud.y + 4), color_index=25)
+        gfx.draw_text(surface, header, (hud.x + 4, hud.y + 4), color_index=25, palette_name=palette)
         if self.selected_region:
             info_rect = pygame.Rect(4, 48, 180, 90)
             gfx.draw_panel(surface, info_rect, palette)
             region = self.state.regions[self.selected_region]
-            gfx.draw_text(surface, REGIONS[region.key].name, (info_rect.x + 4, info_rect.y + 4), color_index=23)
-            gfx.draw_text(surface, f"Owner: {region.owner}", (info_rect.x + 4, info_rect.y + 14))
-            gfx.draw_text(surface, f"Pop: {region.population}", (info_rect.x + 4, info_rect.y + 24))
-            gfx.draw_text(surface, f"Economy: {region.economy}", (info_rect.x + 4, info_rect.y + 34))
-            gfx.draw_text(surface, f"Stability: {region.stability:.2f}", (info_rect.x + 4, info_rect.y + 44))
-            gfx.draw_text(surface, f"Garrison: {len(region.garrison)}", (info_rect.x + 4, info_rect.y + 54))
+            gfx.draw_text(
+                surface,
+                REGIONS[region.key].name,
+                (info_rect.x + 4, info_rect.y + 4),
+                color_index=23,
+                palette_name=palette,
+            )
+            faction = FACTIONS.get(region.owner)
+            emblem_color = faction.color if faction else 20
+            gfx.draw_faction_emblem(surface, (info_rect.x + 4, info_rect.y + 14), palette, emblem_color)
+            gfx.draw_text(
+                surface,
+                f"Owner: {region.owner}",
+                (info_rect.x + 14, info_rect.y + 14),
+                palette_name=palette,
+            )
+            gfx.draw_text(
+                surface,
+                f"Pop: {region.population}",
+                (info_rect.x + 4, info_rect.y + 24),
+                palette_name=palette,
+            )
+            gfx.draw_text(
+                surface,
+                f"Economy: {region.economy}",
+                (info_rect.x + 4, info_rect.y + 34),
+                palette_name=palette,
+            )
+            gfx.draw_text(
+                surface,
+                f"Stability: {region.stability:.2f}",
+                (info_rect.x + 4, info_rect.y + 44),
+                palette_name=palette,
+            )
+            gfx.draw_text(
+                surface,
+                f"Garrison: {len(region.garrison)}",
+                (info_rect.x + 4, info_rect.y + 54),
+                palette_name=palette,
+            )
+        self._draw_diplomacy_panel(surface, palette)
         for button in self.buttons:
             button.draw(surface, palette)
             button.draw_tooltip(surface)
         log_rect = pygame.Rect(4, 172, 312, 24)
         self.message_log.draw(surface, log_rect, palette)
+        hint_area = pygame.Rect(log_rect.x + 2, log_rect.bottom - 8, log_rect.width - 4, 8)
+        surface.fill(gfx.get_palette(palette)[2], hint_area)
+        gfx.draw_text(
+            surface,
+            self._hotkey_hint,
+            (hint_area.x + 2, hint_area.y + 1),
+            color_index=25,
+            palette_name=palette,
+        )
 
     def _draw_map(self, surface: pygame.Surface, palette: str) -> None:
+        highlight_targets = set()
+        if self.moving and self.selected_army:
+            highlight_targets = {
+                neighbor
+                for neighbor in REGIONS[self.selected_army.location].neighbors
+                if neighbor in self.state.fog_of_war.get(PLAYER_FACTION, [])
+            }
         for key, region in REGIONS.items():
             x, y = region.location
             for neighbor in region.neighbors:
@@ -260,5 +384,44 @@ class CampaignScene(SceneBase):
             pygame.draw.circle(surface, gfx.get_palette(palette)[color_index], (x, y), 5)
             if self.selected_region == key and discovered:
                 pygame.draw.circle(surface, gfx.get_palette(palette)[25], (x, y), 7, 1)
+            if key in highlight_targets:
+                pulse = (math.sin(self._highlight_time * 6.0) + 1.0) * 0.5
+                radius = 6 + int(2 * pulse)
+                highlight_color = gfx.get_palette(palette)[24 if pulse > 0.5 else 26]
+                pygame.draw.circle(surface, highlight_color, (x, y), radius, 1)
             if discovered:
-                gfx.draw_text(surface, region.name[:10], (x - 12, y + 8), color_index=15)
+                gfx.draw_text(surface, region.name[:10], (x - 12, y + 8), color_index=15, palette_name=palette)
+        if self.moving and self.selected_army and highlight_targets:
+            origin_pos = REGIONS[self.selected_army.location].location
+            pulse = (math.sin(self._highlight_time * 6.0) + 1.0) * 0.5
+            highlight_color = gfx.get_palette(palette)[24 if pulse > 0.5 else 26]
+            for target in highlight_targets:
+                target_pos = REGIONS[target].location
+                pygame.draw.line(surface, highlight_color, origin_pos, target_pos, 1)
+
+    def _draw_diplomacy_panel(self, surface: pygame.Surface, palette: str) -> None:
+        panel = pygame.Rect(196, 48, 120, 90)
+        gfx.draw_panel(surface, panel, palette)
+        gfx.draw_text(surface, "Diplomacy", (panel.x + 4, panel.y + 4), color_index=24, palette_name=palette)
+        diplomacy = self.state.factions[PLAYER_FACTION].diplomacy
+        y = panel.y + 16
+        for faction in MAJOR_FACTIONS:
+            if faction == PLAYER_FACTION:
+                continue
+            status = diplomacy.relations.get(faction, "peace").lower()
+            if diplomacy.trade.get(faction):
+                status = "trade"
+            color_index = self._status_color_index(status)
+            label = f"{faction[:9]}: {status.upper()}"
+            gfx.draw_text(surface, label, (panel.x + 4, y), color_index=color_index, palette_name=palette)
+            y += 10
+
+    @staticmethod
+    def _status_color_index(status: str) -> int:
+        mapping = {
+            "war": 28,
+            "trade": 24,
+            "peace": 18,
+            "neutral": 15,
+        }
+        return mapping.get(status, 20)

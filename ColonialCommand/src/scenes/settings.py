@@ -31,6 +31,7 @@ class SettingsScene(SceneBase):
         self.toggles = [
             Toggle(pygame.Rect(40, 60, 120, 18), "Audio", not self.context.audio.muted, self._toggle_audio),
             Toggle(pygame.Rect(40, 90, 120, 18), "Scanlines", self.app.scanlines, self._toggle_scanlines),
+            Toggle(pygame.Rect(40, 120, 120, 18), "Skip AI", self.app.skip_ai, self._toggle_skip_ai),
         ]
         self.sliders = [
             Slider(pygame.Rect(200, 80, 100, 18), "Scale", self.app.window_scale, 2, 4, self._change_scale)
@@ -49,6 +50,9 @@ class SettingsScene(SceneBase):
 
     def _toggle_scanlines(self, state: bool) -> None:
         self.app.set_scanlines(state)
+
+    def _toggle_skip_ai(self, state: bool) -> None:
+        self.app.set_skip_ai(state)
 
     def _change_scale(self, value: int) -> None:
         self.app.set_window_scale(value)

@@ -50,6 +50,8 @@ class App:
         self.config["palette"] = self.palette_id
         self.scanlines = self._coerce_bool(config.get("scanlines", False), default=False)
         self.config["scanlines"] = self.scanlines
+        self.skip_ai = self._coerce_bool(config.get("skip_ai_moves", False), default=False)
+        self.config["skip_ai_moves"] = self.skip_ai
         self.state: Optional[GameState] = None
         self.scene_registry: Dict[str, SceneEntry] = {}
         self.active_scene: Optional[SceneBase] = None
@@ -138,6 +140,10 @@ class App:
         self.audio.set_muted(not enabled)
         self.config["audio"] = enabled
 
+    def set_skip_ai(self, enabled: bool) -> None:
+        self.skip_ai = enabled
+        self.config["skip_ai_moves"] = enabled
+
     def run(self) -> None:
         last_time = time.perf_counter()
         while self.running:
@@ -185,6 +191,7 @@ class App:
                 self.active_scene.handle_event(event)
 
     def _update(self, dt: float) -> None:
+        self.message_log.update(dt)
         if self.active_scene:
             self.active_scene.update(dt)
 
@@ -205,6 +212,8 @@ class App:
     def switch_scene(self, name: str, **kwargs) -> None:
         if name not in self.scene_registry:
             raise KeyError(f"Unknown scene '{name}'")
+        if self.active_scene is not None:
+            self.active_scene.on_exit()
         entry = self.scene_registry[name]
         context = self._context_factory()
         if entry.instance is None:
@@ -220,6 +229,7 @@ class App:
     def start_new_game(self, seed: Optional[int] = None) -> None:
         self.state = GameState.new_game(seed)
         save_autosave(self.state)
+        self.config["last_save_slot"] = "autosave"
         self.switch_scene("campaign")
 
     def load_game(self, slot: str) -> bool:

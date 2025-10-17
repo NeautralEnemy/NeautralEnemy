@@ -43,6 +43,9 @@ class SceneBase:
     def on_escape(self) -> bool:
         return False
 
+    def on_exit(self) -> None:
+        pass
+
     @property
     def app(self):
         return self.context.app

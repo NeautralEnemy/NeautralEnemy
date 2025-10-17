@@ -1,7 +1,7 @@
 """Graphics helpers for Colonial Command."""
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import pygame
 
@@ -149,9 +149,16 @@ def get_palette(name: str) -> Palette:
     return _PALETTES.get(name, _default_palette)
 
 
-def draw_text(surface: pygame.Surface, text: str, position: Tuple[int, int], color_index: int = 9) -> None:
-    palette = get_palette("sunset")
-    color = palette[color_index % len(palette)]
+def draw_text(
+    surface: pygame.Surface,
+    text: str,
+    position: Tuple[int, int],
+    color_index: int = 9,
+    palette_name: str = "sunset",
+    color: Optional[Tuple[int, int, int]] = None,
+) -> None:
+    palette = get_palette(palette_name)
+    color_value = color if color is not None else palette[color_index % len(palette)]
     x, y = position
     for char in text.upper():
         glyph = _bitmap_font.get(char)
@@ -161,7 +168,7 @@ def draw_text(surface: pygame.Surface, text: str, position: Tuple[int, int], col
         for row, bits in enumerate(glyph):
             for col in range(5):
                 if bits & (1 << (4 - col)):
-                    surface.set_at((x + col, y + row), color)
+                    surface.set_at((x + col, y + row), color_value)
         x += 6
 
 
@@ -186,6 +193,20 @@ def draw_tooltip(surface: pygame.Surface, text: str, position: Tuple[int, int]) 
     draw_panel(surface, rect, "sunset")
     for i, line in enumerate(lines):
         draw_text(surface, line, (rect.x + 4, rect.y + 4 + i * 8), color_index=15)
+
+
+def draw_faction_emblem(
+    surface: pygame.Surface,
+    position: Tuple[int, int],
+    palette_name: str,
+    color_index: int,
+    size: int = 6,
+) -> None:
+    palette = get_palette(palette_name)
+    base_color = palette[color_index % len(palette)]
+    rect = pygame.Rect(position[0], position[1], size, size)
+    pygame.draw.rect(surface, base_color, rect)
+    pygame.draw.rect(surface, palette[0], rect, 1)
 
 
 def apply_scanlines(surface: pygame.Surface) -> pygame.Surface:

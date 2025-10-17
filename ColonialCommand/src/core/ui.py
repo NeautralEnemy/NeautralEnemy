@@ -12,17 +12,51 @@ from . import gfx
 @dataclass
 class MessageLog:
     max_lines: int
-    lines: List[str] = field(default_factory=list)
+    fade_duration: float = 0.6
+    entries: List["LogEntry"] = field(default_factory=list)
 
     def add(self, text: str) -> None:
-        self.lines.append(text)
-        if len(self.lines) > self.max_lines:
-            self.lines = self.lines[-self.max_lines :]
+        self.entries.append(LogEntry(text=text))
+        if len(self.entries) > self.max_lines:
+            self.entries = self.entries[-self.max_lines :]
+
+    def clear(self) -> None:
+        self.entries.clear()
+
+    def update(self, dt: float) -> None:
+        if not self.entries:
+            return
+        for entry in self.entries:
+            entry.age = min(entry.age + dt, self.fade_duration)
 
     def draw(self, surface: pygame.Surface, rect: pygame.Rect, palette: str = "sunset") -> None:
         gfx.draw_panel(surface, rect, palette)
-        for i, line in enumerate(self.lines[-self.max_lines :]):
-            gfx.draw_text(surface, line[:52], (rect.x + 4, rect.y + 4 + i * 8), color_index=20)
+        palette_colors = gfx.get_palette(palette)
+        base_color = palette_colors[20]
+        highlight_color = palette_colors[25]
+        line_height = 8
+        usable_height = max(0, rect.height - 8)
+        visible = min(len(self.entries), self.max_lines, max(1, usable_height // line_height))
+        recent_entries = self.entries[-visible:]
+        for i, entry in enumerate(recent_entries):
+            t = entry.age / self.fade_duration if self.fade_duration > 0 else 1.0
+            t = max(0.0, min(1.0, t))
+            color = tuple(
+                int(highlight_color[channel] * (1.0 - t) + base_color[channel] * t)
+                for channel in range(3)
+            )
+            gfx.draw_text(
+                surface,
+                entry.text[:52],
+                (rect.x + 4, rect.y + 4 + i * line_height),
+                color=color,
+            )
+
+
+@dataclass
+class LogEntry:
+    text: str
+    age: float = 0.0
 
 
 @dataclass
@@ -34,6 +68,7 @@ class Button:
     hotkey: Optional[int] = None
     enabled: bool = True
     hovered: bool = False
+    selected: bool = False
 
     def handle_event(self, event: pygame.event.Event) -> None:
         if not self.enabled:
@@ -51,6 +86,9 @@ class Button:
         gfx.draw_panel(surface, self.rect, color)
         offset = (1, 1) if self.hovered else (0, 0)
         gfx.draw_text(surface, self.text.upper(), (self.rect.x + 4 + offset[0], self.rect.y + 4 + offset[1]))
+        if self.selected:
+            highlight = gfx.get_palette(palette)[26]
+            pygame.draw.rect(surface, highlight, self.rect, 1)
         if not self.enabled:
             overlay = pygame.Surface(self.rect.size, pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 100))
