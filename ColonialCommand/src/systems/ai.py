@@ -7,7 +7,7 @@ from core.state import GameState, Army, RegionState
 from data.regions import REGIONS
 from data.units import UNITS
 from data.buildings import BuildingDef
-from . import movement, battle_auto
+from . import movement, battle_auto, diplomacy
 
 
 class AIController:
@@ -16,9 +16,32 @@ class AIController:
         self.faction = faction
 
     def take_turn(self) -> None:
+        self.manage_diplomacy()
         self.recruit_if_needed()
         self.build_infrastructure()
         self.perform_moves()
+
+    def manage_diplomacy(self) -> None:
+        rng = self.state.rng()
+        my_regions = len(self.state.regions_owned_by(self.faction))
+        for other in self.state.factions:
+            if other == self.faction:
+                continue
+            relation = diplomacy.get_relation(self.state, self.faction, other)
+            if relation == "war":
+                their_regions = len(self.state.regions_owned_by(other))
+                if my_regions < their_regions and rng.random() < 0.35:
+                    diplomacy.offer_peace(self.state, self.faction, other)
+                continue
+            border = self._has_border_with(other)
+            if border and rng.random() < 0.18:
+                diplomacy.declare_war(self.state, self.faction, other)
+                continue
+            has_trade = self.state.factions[self.faction].diplomacy.trade.get(other, False)
+            if not has_trade and relation != "war" and rng.random() < 0.22:
+                diplomacy.request_trade(self.state, self.faction, other)
+            if relation == "neutral" and border and rng.random() < 0.08:
+                diplomacy.propose_alliance(self.state, self.faction, other)
 
     def build_infrastructure(self) -> None:
         fac = self.state.factions[self.faction]
@@ -108,10 +131,14 @@ class AIController:
 
     def _find_adjacent_enemies(self, region_key: str) -> List[str]:
         enemies = []
-        owner = self.state.regions[region_key].owner
         for neighbor in REGIONS[region_key].neighbors:
-            if self.state.regions[neighbor].owner != self.faction:
-                enemies.append(neighbor)
+            defender_owner = self.state.regions[neighbor].owner
+            if defender_owner == self.faction:
+                continue
+            if defender_owner in self.state.factions:
+                if diplomacy.get_relation(self.state, self.faction, defender_owner) != "war":
+                    continue
+            enemies.append(neighbor)
         enemies.sort(
             key=lambda key: (
                 self.state.region_has_supply(self.state.regions[key].owner, key),
@@ -119,6 +146,13 @@ class AIController:
             )
         )
         return enemies
+
+    def _has_border_with(self, other: str) -> bool:
+        for region in self.state.regions_owned_by(self.faction):
+            for neighbor in REGIONS[region.key].neighbors:
+                if self.state.regions[neighbor].owner == other:
+                    return True
+        return False
 
     def _pick_building(self, region: RegionState, options: List[BuildingDef]) -> BuildingDef:
         building = options[0]
