@@ -13,7 +13,7 @@ from .debug import DebugConsole
 from .saveio import save_autosave
 from .state import GameState
 from .ui import MessageLog
-from ..scenes.base import SceneBase, SceneContext
+from scenes.base import SceneBase, SceneContext
 
 FPS = 60
 INTERNAL_WIDTH = 320
@@ -53,11 +53,11 @@ class App:
         self.switch_scene("menu")
 
     def _register_scenes(self) -> None:
-        from ..scenes.menu import MenuScene
-        from ..scenes.campaign import CampaignScene
-        from ..scenes.settings import SettingsScene
-        from ..scenes.help import HelpScene
-        from ..scenes.tactical import TacticalScene
+        from scenes.menu import MenuScene
+        from scenes.campaign import CampaignScene
+        from scenes.settings import SettingsScene
+        from scenes.help import HelpScene
+        from scenes.tactical import TacticalScene
 
         self.scene_registry = {
             "menu": SceneEntry(lambda ctx: MenuScene(ctx)),
