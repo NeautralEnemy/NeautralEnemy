@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import pygame
 
@@ -19,6 +19,8 @@ FPS = 60
 INTERNAL_WIDTH = 320
 INTERNAL_HEIGHT = 200
 TIME_STEP = 1.0 / 30.0
+WINDOW_SCALE_MIN = 2
+WINDOW_SCALE_MAX = 5
 
 
 @dataclass
@@ -34,23 +36,66 @@ class App:
         self.config = config
         self.clock = pygame.time.Clock()
         self.internal_surface = pygame.Surface((INTERNAL_WIDTH, INTERNAL_HEIGHT))
-        self.window_scale = max(2, int(config.get("window_scale", 3)))
-        self.window = pygame.display.set_mode(
-            (INTERNAL_WIDTH * self.window_scale, INTERNAL_HEIGHT * self.window_scale)
-        )
+        self.window_scale = self._coerce_window_scale(config.get("window_scale", 3))
+        self.window = self._create_window()
+        self.config["window_scale"] = self.window_scale
         self.running = True
         self.accumulator = 0.0
-        self.audio = AudioSystem(muted=not config.get("audio", True))
+        self.audio = AudioSystem(muted=not self._coerce_bool(config.get("audio", True), default=True))
+        self.config["audio"] = not self.audio.muted
         self.message_log = MessageLog(max_lines=6)
         self.debug = DebugConsole()
         self._debug_timer = 0.0
-        self.palette_id = config.get("palette", "sunset")
-        self.scanlines = bool(config.get("scanlines", False))
+        self.palette_id = self._coerce_palette(config.get("palette", "sunset"))
+        self.config["palette"] = self.palette_id
+        self.scanlines = self._coerce_bool(config.get("scanlines", False), default=False)
+        self.config["scanlines"] = self.scanlines
         self.state: Optional[GameState] = None
         self.scene_registry: Dict[str, SceneEntry] = {}
         self.active_scene: Optional[SceneBase] = None
         self._register_scenes()
         self.switch_scene("menu")
+
+    @staticmethod
+    def _coerce_window_scale(value: Any) -> int:
+        try:
+            scale = int(value)
+        except (TypeError, ValueError):
+            scale = 3
+        return max(WINDOW_SCALE_MIN, min(WINDOW_SCALE_MAX, scale))
+
+    @staticmethod
+    def _coerce_bool(value: Any, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    @staticmethod
+    def _coerce_palette(value: Any) -> str:
+        return value if isinstance(value, str) else "sunset"
+
+    def _create_window(self) -> pygame.Surface:
+        size = (INTERNAL_WIDTH * self.window_scale, INTERNAL_HEIGHT * self.window_scale)
+        try:
+            return pygame.display.set_mode(size)
+        except pygame.error:
+            # Retry with a scaled software surface (works around some driver issues).
+            pygame.display.quit()
+            pygame.display.init()
+            flags = getattr(pygame, "SCALED", 0)
+            try:
+                return pygame.display.set_mode(size, flags)
+            except pygame.error as exc:
+                raise RuntimeError(
+                    "Unable to create the game window. Try updating your graphics drivers or "
+                    "running with a different SDL_VIDEODRIVER."
+                ) from exc
 
     def _register_scenes(self) -> None:
         from scenes.menu import MenuScene
@@ -77,11 +122,9 @@ class App:
         )
 
     def set_window_scale(self, scale: int) -> None:
-        self.window_scale = max(2, min(5, scale))
+        self.window_scale = self._coerce_window_scale(scale)
         self.config["window_scale"] = self.window_scale
-        self.window = pygame.display.set_mode(
-            (INTERNAL_WIDTH * self.window_scale, INTERNAL_HEIGHT * self.window_scale)
-        )
+        self.window = self._create_window()
 
     def set_palette(self, palette_id: str) -> None:
         self.palette_id = palette_id

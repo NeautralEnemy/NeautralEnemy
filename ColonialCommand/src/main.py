@@ -14,8 +14,15 @@ from core.saveio import ensure_directories, load_config, save_config
 
 
 def init_pygame() -> None:
-    pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=512)
-    pygame.init()
+    try:
+        pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=512)
+    except pygame.error as exc:
+        print(f"Warning: audio pre-init failed ({exc}). Continuing without pre-init.")
+    _, init_failed = pygame.init()
+    if init_failed:
+        print(f"Warning: {init_failed} pygame subsystem(s) failed to initialize.")
+    if not pygame.display.get_init():
+        raise RuntimeError("Pygame display subsystem failed to initialise.")
     pygame.display.set_caption("Colonial Command")
 
 
@@ -35,6 +42,6 @@ if __name__ == "__main__":
     try:
         init_pygame()
         main()
-    except pygame.error as exc:  # pragma: no cover - top level guard
+    except (pygame.error, RuntimeError) as exc:  # pragma: no cover - top level guard
         print("Failed to initialize Colonial Command:", exc)
         sys.exit(1)
