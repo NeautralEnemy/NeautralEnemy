@@ -27,9 +27,10 @@ class MenuScene(SceneBase):
     def on_enter(self, **kwargs) -> None:
         self.selected_slot = self.app.config.get("last_save_slot", "autosave") or "autosave"
         self.load_panel_visible = False
-        rects = layout_vertical(pygame.Rect(110, 70, 100, 18), 18, 6, 5)
+        rects = layout_vertical(pygame.Rect(110, 60, 100, 18), 18, 6, 6)
         actions = [
             ("New Game", self._new_game, "Start a new campaign"),
+            ("Skirmish", self._start_skirmish, "Quick tactical simulation"),
             ("Load", self._toggle_load_panel, "Browse save slots"),
             ("Settings", self._open_settings, "Adjust visual and audio options"),
             ("Credits", self._show_credits, "Meet the crew"),
@@ -43,6 +44,22 @@ class MenuScene(SceneBase):
 
     def _new_game(self) -> None:
         self.app.start_new_game()
+
+    def _start_skirmish(self) -> None:
+        from core.state import GameState, Army
+        from systems import battle_tactical
+
+        state = GameState.new_game()
+        attacker = Army(faction="Britain", location="london", units=["line", "cavalry", "artillery"], experience=1)
+        defender = Army(faction="France", location="paris", units=["line", "militia", "cavalry"], experience=0)
+        result = battle_tactical.run_simulation(state, attacker, defender)
+        if result == 1:
+            summary = "Skirmish victory for Britain!"
+        elif result == 0:
+            summary = "France holds the line in skirmish."
+        else:
+            summary = "Skirmish inconclusive."
+        self.app.switch_scene("tactical", battle_state={"summary": summary, "return_to": "menu"})
 
     def _toggle_load_panel(self) -> None:
         self.load_panel_visible = not self.load_panel_visible

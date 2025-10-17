@@ -7,7 +7,7 @@ from typing import Optional
 import pygame
 
 from core import gfx
-from core.state import GameState, SEASONS, Army
+from core.state import GameState, SEASONS, Army, Objective, StoryEvent, EventChoice
 from core.saveio import save_autosave
 from core.ui import Button
 from data.factions import FACTIONS, MAJOR_FACTIONS
@@ -35,6 +35,13 @@ class CampaignScene(SceneBase):
         self._entered: bool = False
         self._highlight_time: float = 0.0
         self._hotkey_hint = "Hotkeys: H Help | U Undo | G +1000 | F Reveal"
+        self.objective_status: list[tuple[Objective, int, int]] = []
+        self._active_event: Optional[StoryEvent] = None
+        self._event_buttons: list[tuple[Button, EventChoice]] = []
+        self._research_banner: Optional[dict] = None
+        self._advisor_tip: str = ""
+        self._advisor_timer: float = 0.0
+        self._trade_timer: float = 0.0
 
     @property
     def state(self) -> GameState:
@@ -55,6 +62,8 @@ class CampaignScene(SceneBase):
             self.message_log.clear()
             self._entered = True
         self._highlight_time = 0.0
+        self._trade_timer = 0.0
+        self._refresh_objectives()
 
     def _build_buttons(self) -> None:
         self.buttons = [
@@ -94,6 +103,10 @@ class CampaignScene(SceneBase):
         ]
 
     def handle_event(self, event: pygame.event.Event) -> None:
+        if self._active_event:
+            for button, _ in self._event_buttons:
+                button.handle_event(event)
+            return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             pos = event.pos
             self._pick_region(pos)
@@ -196,9 +209,9 @@ class CampaignScene(SceneBase):
         if fac.treasury < cost:
             self.state.add_event("Not enough funds")
             return
-        region.garrison.append("line")
+        region.recruit_queue.append("line")
         fac.treasury -= cost
-        self.state.add_event(f"Recruited Line Infantry in {REGIONS[region.key].name}")
+        self.state.add_event(f"Line Infantry training in {REGIONS[region.key].name}")
 
     def _build(self) -> None:
         if not self.selected_region:
@@ -267,6 +280,8 @@ class CampaignScene(SceneBase):
             ai.run_ai_turns(self.state, PLAYER_FACTION)
         self.state.advance_turn()
         movement.reset_movement(self.state)
+        self.state.process_recruitment()
+        self.state.prepare_turn_events(PLAYER_FACTION)
         save_autosave(self.state)
         treasury_after = self.state.factions[PLAYER_FACTION].treasury
         delta = treasury_after - treasury_before
@@ -274,6 +289,7 @@ class CampaignScene(SceneBase):
             f"Treasury summary: +{income_total} income -{upkeep_total} upkeep = {delta:+d}"
         )
         self.state.add_event("Turn ended")
+        self._refresh_objectives()
 
     def update(self, dt: float) -> None:
         self.context.audio.play_loop("campaign_ambient", AMBIENT_FREQUENCIES, duration=3.0, volume=0.12)
@@ -281,15 +297,40 @@ class CampaignScene(SceneBase):
             self._highlight_time += dt
         else:
             self._highlight_time = 0.0
+        self._trade_timer += dt
+        if self._trade_timer > math.tau:
+            self._trade_timer -= math.tau
         events = self.state.last_events
         if len(events) > self._last_event_count:
             for evt in events[self._last_event_count :]:
                 self.message_log.add(evt)
             self._last_event_count = len(events)
+        self._refresh_objectives()
+        if not self._active_event and self.state.has_pending_events(PLAYER_FACTION):
+            event = self.state.pop_next_event(PLAYER_FACTION)
+            if event:
+                self._present_event(event)
+        if self._research_banner:
+            self._research_banner["timer"] -= dt
+            if self._research_banner["timer"] <= 0:
+                self._research_banner = None
+        else:
+            notice = self.state.pop_research_notification()
+            if notice:
+                faction, tech = notice
+                text = f"{faction} completed {tech}"
+                self._research_banner = {"text": text, "timer": 3.0}
+                self.context.audio.play("research_banner", frequency=660, duration=0.35)
+        self._advisor_timer += dt
+        if self._advisor_timer >= 3.0:
+            self._advisor_timer = 0.0
+            self._refresh_advisor_tip()
 
     def on_exit(self) -> None:
         self.context.audio.stop_loop("campaign_ambient")
         self._set_moving(False)
+        self._active_event = None
+        self._event_buttons.clear()
 
     def draw(self, surface: pygame.Surface, alpha: float) -> None:
         palette = self.app.palette_id
@@ -342,6 +383,15 @@ class CampaignScene(SceneBase):
                 (info_rect.x + 4, info_rect.y + 54),
                 palette_name=palette,
             )
+            queue_preview = ", ".join(UNITS[u].name[:8] for u in region.recruit_queue[:3]) or "None"
+            gfx.draw_text(
+                surface,
+                f"Queue: {queue_preview}",
+                (info_rect.x + 4, info_rect.y + 64),
+                palette_name=palette,
+            )
+        self._draw_objectives(surface, palette)
+        self._draw_advisor(surface, palette)
         self._draw_diplomacy_panel(surface, palette)
         for button in self.buttons:
             button.draw(surface, palette)
@@ -357,6 +407,10 @@ class CampaignScene(SceneBase):
             color_index=25,
             palette_name=palette,
         )
+        if self._research_banner:
+            self._draw_research_banner(surface, palette)
+        if self._active_event:
+            self._draw_event_overlay(surface, palette)
 
     def _draw_map(self, surface: pygame.Surface, palette: str) -> None:
         highlight_targets = set()
@@ -371,6 +425,7 @@ class CampaignScene(SceneBase):
             for neighbor in region.neighbors:
                 nx, ny = REGIONS[neighbor].location
                 pygame.draw.line(surface, gfx.get_palette(palette)[5], (x, y), (nx, ny), 1)
+        self._draw_trade_routes(surface, palette)
         for key, region in REGIONS.items():
             x, y = region.location
             discovered = key in self.state.fog_of_war.get(PLAYER_FACTION, [])
@@ -398,6 +453,119 @@ class CampaignScene(SceneBase):
             for target in highlight_targets:
                 target_pos = REGIONS[target].location
                 pygame.draw.line(surface, highlight_color, origin_pos, target_pos, 1)
+
+    def _draw_trade_routes(self, surface: pygame.Surface, palette: str) -> None:
+        fac = self.state.factions[PLAYER_FACTION]
+        origin_key = self.state.faction_capital(PLAYER_FACTION)
+        if not origin_key or origin_key not in REGIONS:
+            return
+        origin = REGIONS[origin_key].location
+        partners = [partner for partner, active in fac.diplomacy.trade.items() if active]
+        colors = gfx.get_palette(palette)
+        for idx, partner in enumerate(partners):
+            dest_key = self.state.faction_capital(partner)
+            if not dest_key or dest_key not in REGIONS:
+                continue
+            dest = REGIONS[dest_key].location
+            pygame.draw.line(surface, colors[21], origin, dest, 1)
+            t = (self._trade_timer * 0.3 + idx * 0.2) % 1.0
+            px = int(origin[0] + (dest[0] - origin[0]) * t)
+            py = int(origin[1] + (dest[1] - origin[1]) * t)
+            pygame.draw.circle(surface, colors[25], (px, py), 1)
+
+    def _draw_objectives(self, surface: pygame.Surface, palette: str) -> None:
+        panel = pygame.Rect(196, 48, 116, 90)
+        gfx.draw_panel(surface, panel, palette)
+        gfx.draw_text(surface, "Objectives", (panel.x + 4, panel.y + 4), color_index=24, palette_name=palette)
+        colors = gfx.get_palette(palette)
+        for i, (objective, current, target) in enumerate(self.objective_status[:4]):
+            y = panel.y + 16 + i * 18
+            box = pygame.Rect(panel.x + 4, y, 8, 8)
+            pygame.draw.rect(surface, colors[10], box)
+            if objective.completed:
+                pygame.draw.line(surface, colors[25], (box.x, box.y + 4), (box.x + 3, box.y + 8), 1)
+                pygame.draw.line(surface, colors[25], (box.x + 3, box.y + 8), (box.x + 8, box.y), 1)
+            progress = min(current, target)
+            text = f"{objective.description[:18]} ({progress}/{target})"
+            gfx.draw_text(surface, text, (box.right + 4, box.y), color_index=20, palette_name=palette)
+
+    def _draw_advisor(self, surface: pygame.Surface, palette: str) -> None:
+        rect = pygame.Rect(196, 140, 116, 28)
+        gfx.draw_panel(surface, rect, palette)
+        gfx.draw_text(surface, "Advisor", (rect.x + 4, rect.y + 4), color_index=23, palette_name=palette)
+        tip = self._advisor_tip or "All quiet across the empire."
+        gfx.draw_text(surface, tip[:28], (rect.x + 4, rect.y + 14), color_index=18, palette_name=palette)
+
+    def _draw_research_banner(self, surface: pygame.Surface, palette: str) -> None:
+        rect = pygame.Rect(40, 4, 240, 16)
+        overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 120))
+        surface.blit(overlay, rect.topleft)
+        gfx.draw_text(surface, self._research_banner["text"][:30], (rect.x + 6, rect.y + 4), color_index=27, palette_name=palette)
+
+    def _draw_event_overlay(self, surface: pygame.Surface, palette: str) -> None:
+        rect = pygame.Rect(40, 40, 240, 120)
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 140))
+        surface.blit(overlay, (0, 0))
+        gfx.draw_panel(surface, rect, palette)
+        gfx.draw_text(surface, self._active_event.title, (rect.x + 8, rect.y + 6), color_index=25, palette_name=palette)
+        desc = self._active_event.description
+        for i in range(3):
+            segment = desc[i * 34 : (i + 1) * 34]
+            if not segment:
+                break
+            gfx.draw_text(
+                surface,
+                segment,
+                (rect.x + 8, rect.y + 18 + i * 10),
+                color_index=20,
+                palette_name=palette,
+            )
+        for button, _ in self._event_buttons:
+            button.draw(surface, palette)
+            button.draw_tooltip(surface)
+
+    def _present_event(self, event: StoryEvent) -> None:
+        self._active_event = event
+        self._event_buttons = []
+        base_rect = pygame.Rect(50, 88, 220, 18)
+        for i, choice in enumerate(event.choices):
+            rect = pygame.Rect(base_rect.x, base_rect.y + i * 22, base_rect.width, base_rect.height)
+            button = Button(
+                rect=rect,
+                text=choice.label,
+                on_click=lambda c=choice: self._select_event_choice(c),
+                tooltip=choice.result,
+            )
+            self._event_buttons.append((button, choice))
+
+    def _select_event_choice(self, choice: EventChoice) -> None:
+        self.state.resolve_event_choice(PLAYER_FACTION, choice)
+        self.message_log.add(f"Event resolved: {choice.result}")
+        self._active_event = None
+        self._event_buttons.clear()
+
+    def _refresh_objectives(self) -> None:
+        self.objective_status = self.state.evaluate_objectives(PLAYER_FACTION)
+
+    def _refresh_advisor_tip(self) -> None:
+        fac = self.state.factions[PLAYER_FACTION]
+        new_tip = ""
+        if fac.treasury < 60:
+            new_tip = "Treasury low. Secure income."
+        elif not fac.research_queue:
+            new_tip = "Queue research to stay ahead."
+        else:
+            troubled = [reg for reg in self.state.regions_owned_by(PLAYER_FACTION) if reg.stability < 0.7]
+            if troubled:
+                new_tip = f"Boost stability in {REGIONS[troubled[0].key].name}."
+            elif all(not reg.recruit_queue for reg in self.state.regions_owned_by(PLAYER_FACTION)):
+                new_tip = "Consider training new units."
+        if new_tip != self._advisor_tip:
+            self._advisor_tip = new_tip
+            if new_tip:
+                self.message_log.add(f"Advisor: {new_tip}")
 
     def _draw_diplomacy_panel(self, surface: pygame.Surface, palette: str) -> None:
         panel = pygame.Rect(196, 48, 120, 90)

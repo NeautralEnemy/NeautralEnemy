@@ -5,7 +5,7 @@ import json
 import random
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from data.factions import FACTIONS, MAJOR_FACTIONS
 from data.regions import REGIONS, RegionDef
@@ -23,9 +23,11 @@ class Army:
     location: str
     units: List[str]
     movement: int = 1
+    experience: int = 0
 
     def power(self) -> int:
-        return sum(UNITS[u].attack + UNITS[u].defense for u in self.units)
+        base = sum(UNITS[u].attack + UNITS[u].defense for u in self.units)
+        return base + self.experience * 2
 
 
 @dataclass
@@ -37,6 +39,7 @@ class RegionState:
     stability: float
     garrison: List[str]
     discovered: bool = False
+    recruit_queue: List[str] = field(default_factory=list)
 
     def income(self) -> int:
         return int(self.economy * max(0.4, self.stability))
@@ -67,6 +70,31 @@ class FactionState:
 
 
 @dataclass
+class Objective:
+    id: str
+    description: str
+    type: str
+    target: int
+    completed: bool = False
+
+
+@dataclass
+class EventChoice:
+    label: str
+    effect: str
+    result: str
+
+
+@dataclass
+class StoryEvent:
+    id: str
+    faction: str
+    title: str
+    description: str
+    choices: List[EventChoice]
+
+
+@dataclass
 class GameState:
     factions: Dict[str, FactionState]
     regions: Dict[str, RegionState]
@@ -77,6 +105,9 @@ class GameState:
     rng_seed: int
     fog_of_war: Dict[str, List[str]] = field(default_factory=dict)
     last_events: List[str] = field(default_factory=list)
+    objectives: Dict[str, List[Objective]] = field(default_factory=dict)
+    pending_events: List[StoryEvent] = field(default_factory=list)
+    research_notifications: List[Tuple[str, str]] = field(default_factory=list)
 
     @classmethod
     def new_game(cls, seed: Optional[int] = None) -> "GameState":
@@ -104,6 +135,13 @@ class GameState:
             fog.setdefault(region.owner, [])
             if region.key not in fog[region.owner]:
                 fog[region.owner].append(region.key)
+        objectives = {
+            "Britain": [
+                Objective("expand", "Control 4 regions", "regions", 4),
+                Objective("wealth", "Reach a treasury of 400", "treasury", 400),
+                Objective("innovation", "Complete 1 technology", "tech", 1),
+            ]
+        }
         return cls(
             factions=factions,
             regions=regions,
@@ -113,7 +151,8 @@ class GameState:
             year=1700,
             rng_seed=seed_value,
             fog_of_war=fog,
-            last_events=["Campaign begins"]
+            last_events=["Campaign begins"],
+            objectives=objectives,
         )
 
     def to_json(self) -> str:
@@ -144,10 +183,51 @@ class GameState:
                 stability=reg.get("stability", 1.0),
                 garrison=list(reg.get("garrison", [])),
                 discovered=reg.get("discovered", False),
+                recruit_queue=list(reg.get("recruit_queue", [])),
             )
             for key, reg in data["regions"].items()
         }
-        armies = [Army(**army) for army in data.get("armies", [])]
+        armies = [
+            Army(
+                faction=army["faction"],
+                location=army["location"],
+                units=list(army.get("units", [])),
+                movement=army.get("movement", 1),
+                experience=army.get("experience", 0),
+            )
+            for army in data.get("armies", [])
+        ]
+        objectives = {
+            fac: [
+                Objective(
+                    id=obj.get("id", f"obj{i}"),
+                    description=obj.get("description", "Objective"),
+                    type=obj.get("type", "regions"),
+                    target=obj.get("target", 1),
+                    completed=obj.get("completed", False),
+                )
+                for i, obj in enumerate(objs)
+            ]
+            for fac, objs in data.get("objectives", {}).items()
+        }
+        pending_events = [
+            StoryEvent(
+                id=evt.get("id", "event"),
+                faction=evt.get("faction", "Britain"),
+                title=evt.get("title", "Event"),
+                description=evt.get("description", ""),
+                choices=[
+                    EventChoice(
+                        label=choice.get("label", "OK"),
+                        effect=choice.get("effect", ""),
+                        result=choice.get("result", ""),
+                    )
+                    for choice in evt.get("choices", [])
+                ],
+            )
+            for evt in data.get("pending_events", [])
+        ]
+        research_notifications = [tuple(item) for item in data.get("research_notifications", [])]
         return cls(
             factions=factions,
             regions=regions,
@@ -158,6 +238,9 @@ class GameState:
             rng_seed=data.get("rng_seed", 0),
             fog_of_war=data.get("fog_of_war", {}),
             last_events=data.get("last_events", []),
+            objectives=objectives,
+            pending_events=pending_events,
+            research_notifications=research_notifications,
         )
 
     @classmethod
@@ -246,5 +329,137 @@ class GameState:
             fac.research_queue = None
             fac.research_points = 0
             self.add_event(f"{faction} researched {node.name}")
+            self.research_notifications.append((faction, node.name))
             return node.key
         return None
+
+    # Objective helpers -------------------------------------------------
+
+    def ensure_objectives(self, faction: str) -> List[Objective]:
+        if faction not in self.objectives:
+            self.objectives[faction] = [
+                Objective("expand", "Control 4 regions", "regions", 4),
+                Objective("wealth", "Reach a treasury of 400", "treasury", 400),
+                Objective("innovation", "Complete 1 technology", "tech", 1),
+            ]
+        return self.objectives[faction]
+
+    def evaluate_objectives(self, faction: str) -> List[Tuple[Objective, int, int]]:
+        objectives = self.ensure_objectives(faction)
+        results: List[Tuple[Objective, int, int]] = []
+        for obj in objectives:
+            current = 0
+            if obj.type == "regions":
+                current = len(self.regions_owned_by(faction))
+            elif obj.type == "treasury":
+                current = self.factions[faction].treasury
+            elif obj.type == "tech":
+                current = sum(self.factions[faction].tech_progress.values())
+            if current >= obj.target and not obj.completed:
+                obj.completed = True
+                self.add_event(f"Objective complete: {obj.description}")
+            results.append((obj, current, obj.target))
+        return results
+
+    # Recruitment -------------------------------------------------------
+
+    def process_recruitment(self) -> None:
+        for region in self.regions.values():
+            if region.recruit_queue:
+                unit_key = region.recruit_queue.pop(0)
+                region.garrison.append(unit_key)
+                unit_name = UNITS[unit_key].name
+                region_name = REGIONS[region.key].name
+                self.add_event(f"{region.owner} raised {unit_name} in {region_name}")
+
+    # Narrative events --------------------------------------------------
+
+    def has_pending_events(self, faction: str) -> bool:
+        return any(evt for evt in self.pending_events if evt.faction == faction)
+
+    def pop_next_event(self, faction: str) -> Optional[StoryEvent]:
+        for idx, evt in enumerate(self.pending_events):
+            if evt.faction == faction:
+                return self.pending_events.pop(idx)
+        return None
+
+    def prepare_turn_events(self, faction: str) -> None:
+        rng = self.rng()
+        chance = 0.35
+        if rng.random() > chance:
+            return
+        templates = [
+            (
+                "harbor_fire",
+                "Harbor Fire!",
+                "A blaze engulfs warehouses near the docks. Merchants plead for support.",
+                [
+                    ("Send relief", "treasury:-80", "Funds sent to rebuild the harbor"),
+                    ("Let insurance handle it", "stability:-5", "Merchants grumble about neglect"),
+                ],
+            ),
+            (
+                "colonial_windfall",
+                "Colonial Windfall",
+                "A rich shipment from the colonies arrives ahead of schedule.",
+                [
+                    ("Sell at auction", "treasury:+120", "Treasury swells with silver"),
+                    ("Invest in colonies", "stability:+5", "Colonial governors praise your support"),
+                ],
+            ),
+            (
+                "innovation_push",
+                "Inventor's Proposal",
+                "A tinkerer claims to speed musket drills if funded.",
+                [
+                    ("Back the idea", "research:+30", "Research surges ahead"),
+                    ("Decline politely", "treasury:+40", "Funds saved for other ventures"),
+                ],
+            ),
+        ]
+        template = rng.choice(templates)
+        choices = [EventChoice(label=lbl, effect=eff, result=res) for lbl, eff, res in template[3]]
+        event = StoryEvent(
+            id=template[0],
+            faction=faction,
+            title=template[1],
+            description=template[2],
+            choices=choices,
+        )
+        self.pending_events.append(event)
+
+    def faction_capital(self, faction: str) -> Optional[str]:
+        faction_def = FACTIONS.get(faction)
+        if not faction_def:
+            return None
+        return faction_def.capital
+
+    def pop_research_notification(self) -> Optional[Tuple[str, str]]:
+        if self.research_notifications:
+            return self.research_notifications.pop(0)
+        return None
+
+    def resolve_event_choice(self, faction: str, choice: EventChoice) -> None:
+        kind, _, value = choice.effect.partition(":")
+        if kind == "treasury":
+            delta = int(float(value or 0))
+            self.factions[faction].treasury += delta
+        elif kind == "stability":
+            delta = float(value or 0) / 100.0
+            region_key = self.faction_capital(faction)
+            region = self.regions.get(region_key) if region_key else None
+            if region:
+                region.stability = max(0.2, min(1.4, region.stability + delta))
+        elif kind == "research":
+            boost = int(float(value or 0) or 20)
+            fac = self.factions[faction]
+            if not fac.research_queue:
+                for category, nodes in TECH_TREE.items():
+                    if fac.tech_progress.get(category, 0) < len(nodes):
+                        fac.research_queue = category
+                        fac.research_points = 0
+                        break
+            if fac.research_queue:
+                fac.research_points += boost
+        self.add_event(choice.result)
+

@@ -12,8 +12,8 @@ class BattleResult(Dict[str, int]):
 
 
 def resolve_auto(state: GameState, attacker: Army, defender: Army) -> BattleResult:
-    atk_power = sum(UNITS[u].attack for u in attacker.units)
-    def_power = sum(UNITS[u].defense for u in defender.units)
+    atk_power = sum(UNITS[u].attack for u in attacker.units) + attacker.experience * 2
+    def_power = sum(UNITS[u].defense for u in defender.units) + defender.experience * 2
     morale_bonus = state.factions[attacker.faction].morale_modifier()
     atk_score = atk_power * morale_bonus
     def_score = def_power
@@ -25,10 +25,12 @@ def resolve_auto(state: GameState, attacker: Army, defender: Army) -> BattleResu
         attacker.units = attacker.units[:-losses] if losses < len(attacker.units) else []
         defender.units = []
         state.add_event(f"{attacker.faction} wins with auto-resolve")
+        attacker.experience = min(attacker.experience + 1, 5)
         return BattleResult(winner=1)
     else:
         losses = min(len(defender.units), max(1, int(len(defender.units) * 0.2)))
         defender.units = defender.units[:-losses] if losses < len(defender.units) else []
         attacker.units = []
         state.add_event(f"{defender.faction} defends successfully")
+        defender.experience = min(defender.experience + 1, 5)
         return BattleResult(winner=0)
