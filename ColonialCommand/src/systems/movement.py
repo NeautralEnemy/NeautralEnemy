@@ -32,6 +32,7 @@ def move_army(state: GameState, army: Army, destination: str) -> bool:
     army.movement = max(0, army.movement - cost)
     state.reveal_region(army.faction, destination)
     state.add_event(f"{army.faction} army moved to {REGIONS[destination].name}")
+    state.evaluate_maritime_threats()
     return True
 
 

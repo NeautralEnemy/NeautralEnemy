@@ -221,7 +221,13 @@ def apply_scanlines(surface: pygame.Surface) -> pygame.Surface:
     return scan
 
 
-def draw_icon(surface: pygame.Surface, center: Tuple[int, int], icon: str, palette_name: str) -> None:
+def draw_icon(
+    surface: pygame.Surface,
+    center: Tuple[int, int],
+    icon: str,
+    palette_name: str,
+    badges: Optional[Dict[str, object]] = None,
+) -> None:
     palette = get_palette(palette_name)
     color = palette[12]
     x, y = center
@@ -238,3 +244,16 @@ def draw_icon(surface: pygame.Surface, center: Tuple[int, int], icon: str, palet
         pygame.draw.polygon(surface, color, [(x - 6, y + 4), (x + 6, y + 4), (x, y - 6)])
     else:
         pygame.draw.circle(surface, color, (x, y), 4)
+    if not badges:
+        return
+    if badges.get("unsupplied"):
+        pygame.draw.line(surface, palette[28], (x - 4, y - 4), (x + 4, y + 4), 1)
+        pygame.draw.line(surface, palette[28], (x - 4, y + 4), (x + 4, y - 4), 1)
+    veterancy = int(badges.get("veterancy", 0))
+    if veterancy > 0:
+        for i in range(min(3, veterancy)):
+            pygame.draw.circle(surface, palette[24], (x - 4 + i * 4, y + 7), 1)
+    if badges.get("patrol"):
+        pygame.draw.circle(surface, palette[25], (x, y), 7, 1)
+    if badges.get("spy"):
+        pygame.draw.circle(surface, palette[21], (x, y), 2, 1)

@@ -38,6 +38,71 @@ WEATHER_DESCRIPTIONS = {
     "Winter": "Bitter cold saps assaults yet bolsters defensive stands.",
 }
 
+SEASONAL_EVENTS: Dict[str, List[dict]] = {
+    "Spring": [
+        {
+            "id": "spring_bloom",
+            "name": "Spring Bloom",
+            "description": "Bountiful harvest forecasts lift provincial income.",
+            "income": 0.12,
+            "stability": 0.02,
+        },
+        {
+            "id": "spring_floods",
+            "name": "Thaw Flooding",
+            "description": "Meltwater floods hamper roads and supply trains.",
+            "supply": -0.2,
+            "movement": -0.1,
+        },
+    ],
+    "Summer": [
+        {
+            "id": "summer_drought",
+            "name": "Dry Drought",
+            "description": "Parched fields dent income and rile the populace.",
+            "income": -0.1,
+            "stability": -0.03,
+        },
+        {
+            "id": "summer_winds",
+            "name": "Steady Trade Winds",
+            "description": "Reliable winds speed convoys and naval patrols.",
+            "naval": 0.15,
+        },
+    ],
+    "Autumn": [
+        {
+            "id": "autumn_harvest",
+            "name": "Rich Harvest",
+            "description": "Granaries swell, easing supply concerns and morale.",
+            "supply": 0.25,
+            "stability": 0.04,
+        },
+        {
+            "id": "autumn_storms",
+            "name": "Atlantic Storms",
+            "description": "Tempests endanger trade convoys and naval patrols.",
+            "naval": -0.2,
+            "attack": -0.05,
+        },
+    ],
+    "Winter": [
+        {
+            "id": "winter_freeze",
+            "name": "Deep Freeze",
+            "description": "Frozen roads strangle supply and batter armies.",
+            "supply": -0.25,
+            "attack": -0.1,
+        },
+        {
+            "id": "winter_markets",
+            "name": "Winter Markets",
+            "description": "Festivals and markets buoy trade income despite the chill.",
+            "income": 0.08,
+        },
+    ],
+}
+
 GOVERNOR_TRAITS = {
     "merchant": {
         "description": "Merchant guilds swell tax coffers.",
@@ -105,6 +170,8 @@ class RegionState:
     unsupplied_turns: int = 0
     governor_trait: str = ""
     governor_turns: int = 0
+    governor_level: int = 1
+    governor_loyalty: float = 1.0
 
     def income(self) -> int:
         resource = REGIONS[self.key].resource
@@ -128,6 +195,7 @@ class FactionState:
     diplomacy: Diplomacy = field(default_factory=Diplomacy)
     bonus_modifiers: Dict[str, float] = field(default_factory=dict)
     capital_upgrade: int = 0
+    personality: Dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         faction = FACTIONS.get(self.name)
@@ -136,6 +204,14 @@ class FactionState:
                 self.bonus_modifiers.setdefault(key, 0.0)
                 if self.bonus_modifiers[key] == 0.0:
                     self.bonus_modifiers[key] = value
+        if not self.personality:
+            rng = random.Random(hash(self.name) & 0xFFFF)
+            self.personality = {
+                "aggression": 0.4 + rng.random() * 0.5,
+                "diplomacy": 0.3 + rng.random() * 0.5,
+                "naval": 0.2 + rng.random() * 0.6,
+                "memory": 0.5 + rng.random() * 0.4,
+            }
 
     def get_modifier(self, key: str) -> float:
         return self.bonus_modifiers.get(key, 0.0)
@@ -203,6 +279,10 @@ class GameState:
     pending_events: List[StoryEvent] = field(default_factory=list)
     research_notifications: List[Tuple[str, str]] = field(default_factory=list)
     battle_journal: List[Dict[str, str]] = field(default_factory=list)
+    seasonal_event: Optional[dict] = None
+    diplomacy_missions: Dict[str, Dict[str, dict]] = field(default_factory=dict)
+    ai_memory: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    trade_threats: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def new_game(cls, seed: Optional[int] = None) -> "GameState":
@@ -238,6 +318,8 @@ class GameState:
                 discovered=(owner == "Britain"),
                 governor_trait=trait,
                 governor_turns=duration,
+                governor_level=1,
+                governor_loyalty=1.0,
             )
             faction_def = FACTIONS.get(owner)
             if faction_def and faction_def.capital == key:
@@ -260,7 +342,7 @@ class GameState:
                 Objective("innovation", "Complete 1 technology", "tech", 1),
             ]
         }
-        return cls(
+        state = cls(
             factions=factions,
             regions=regions,
             armies=armies,
@@ -273,6 +355,10 @@ class GameState:
             objectives=objectives,
             battle_journal=[],
         )
+        state.roll_seasonal_event(announce=False)
+        state._initialise_diplomacy_memory()
+        state.evaluate_maritime_threats()
+        return state
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -324,6 +410,8 @@ class GameState:
                 unsupplied_turns=reg.get("unsupplied_turns", 0),
                 governor_trait=reg.get("governor_trait", "merchant"),
                 governor_turns=reg.get("governor_turns", 3),
+                governor_level=reg.get("governor_level", 1),
+                governor_loyalty=reg.get("governor_loyalty", 1.0),
             )
         armies = [
             Army(
@@ -379,7 +467,7 @@ class GameState:
             for evt in data.get("pending_events", [])
         ]
         research_notifications = [tuple(item) for item in data.get("research_notifications", [])]
-        return cls(
+        state = cls(
             factions=factions,
             regions=regions,
             armies=armies,
@@ -393,7 +481,14 @@ class GameState:
             pending_events=pending_events,
             research_notifications=research_notifications,
             battle_journal=list(data.get("battle_journal", [])),
+            seasonal_event=data.get("seasonal_event"),
+            diplomacy_missions=dict(data.get("diplomacy_missions", {})),
+            ai_memory=dict(data.get("ai_memory", {})),
+            trade_threats=dict(data.get("trade_threats", {})),
         )
+        state._initialise_diplomacy_memory()
+        state.evaluate_maritime_threats()
+        return state
 
     @classmethod
     def load(cls, slot: str) -> Optional["GameState"]:
@@ -417,8 +512,11 @@ class GameState:
             summary = self.weather_summary()
             if summary:
                 self.add_event(f"Season shifts to {self.current_season()}: {summary}")
+            self.roll_seasonal_event(player=player_faction)
         self.rotate_governors(announce_for=player_faction)
         self.tick_patrols()
+        self._tick_governor_loyalty(player_faction)
+        self.evaluate_maritime_threats()
 
     def rng(self) -> random.Random:
         return random.Random(self.rng_seed + self.turn)
@@ -430,16 +528,152 @@ class GameState:
         return WEATHER_PROFILES.get(self.current_season(), WEATHER_PROFILES["Spring"])
 
     def weather_movement_modifier(self) -> float:
-        return self.weather_profile().get("movement", 1.0)
+        base = self.weather_profile().get("movement", 1.0)
+        return max(0.4, base * (1.0 + self.seasonal_event_modifier("movement", 0.0)))
 
     def weather_attack_modifier(self) -> float:
-        return self.weather_profile().get("attack", 1.0)
+        base = self.weather_profile().get("attack", 1.0)
+        return max(0.5, base * (1.0 + self.seasonal_event_modifier("attack", 0.0)))
 
     def weather_defense_modifier(self) -> float:
-        return self.weather_profile().get("defense", 1.0)
+        base = self.weather_profile().get("defense", 1.0)
+        return max(0.5, base * (1.0 + self.seasonal_event_modifier("defense", 0.0)))
 
     def weather_summary(self) -> str:
         return WEATHER_DESCRIPTIONS.get(self.current_season(), "")
+
+    def seasonal_event_text(self) -> str:
+        if not self.seasonal_event:
+            return ""
+        return f"{self.seasonal_event.get('name', 'Seasonal Event')}: {self.seasonal_event.get('description', '')}"
+
+    def seasonal_event_modifier(self, key: str, default: float = 0.0) -> float:
+        if not self.seasonal_event:
+            return default
+        return float(self.seasonal_event.get(key, default))
+
+    def roll_seasonal_event(self, announce: bool = True, player: Optional[str] = None) -> None:
+        season = self.current_season()
+        pool = SEASONAL_EVENTS.get(season, [])
+        if not pool:
+            self.seasonal_event = None
+            return
+        rng = self.rng()
+        self.seasonal_event = dict(rng.choice(pool))
+        if announce:
+            summary = self.seasonal_event_text()
+            if summary:
+                self.add_event(summary)
+        if player and announce and self.seasonal_event:
+            hint = self.seasonal_event.get("description")
+            if hint:
+                self.add_event(f"Impact: {hint}")
+
+    def _initialise_diplomacy_memory(self) -> None:
+        for faction in self.factions:
+            memory = self.ai_memory.setdefault(faction, {})
+            missions = self.diplomacy_missions.setdefault(faction, {})
+            for other in self.factions:
+                if other == faction:
+                    continue
+                memory.setdefault(other, 0.0)
+                if not missions.get(other):
+                    missions[other] = self._generate_diplomatic_mission(faction, other)
+
+    def _generate_diplomatic_mission(self, faction: str, other: str) -> dict:
+        rng = self.rng()
+        mission_type = rng.choice(["gift", "mission", "escort"])
+        if mission_type == "gift":
+            amount = 60 + rng.randint(0, 80)
+            return {
+                "type": "gift",
+                "value": amount,
+                "description": f"Offer {other} a {amount} gold gift to soften relations.",
+                "progress": 0,
+                "completed": False,
+            }
+        if mission_type == "escort":
+            return {
+                "type": "escort",
+                "value": 2,
+                "description": "Maintain two active naval patrols to reassure trade partners.",
+                "progress": 0,
+                "completed": False,
+            }
+        target = rng.choice(list(self.regions.keys())) if self.regions else "region"
+        return {
+            "type": "mission",
+            "value": target,
+            "description": f"Capture {REGIONS.get(target, RegionDef(target, target, (0, 0), [], '', 0)).name} to impress {other}.",
+            "progress": 0,
+            "completed": False,
+        }
+
+    def register_diplomacy_memory(self, actor: str, other: str, delta: float) -> None:
+        memory = self.ai_memory.setdefault(actor, {})
+        memory[other] = memory.get(other, 0.0) + delta
+        clamp = max(-2.0, min(2.0, memory[other]))
+        memory[other] = clamp
+
+    def offer_sweetener(self, faction: str, other: str, amount: int) -> bool:
+        if amount <= 0:
+            return False
+        fac = self.factions.get(faction)
+        rival = self.factions.get(other)
+        if not fac or not rival:
+            return False
+        if fac.treasury < amount:
+            return False
+        fac.treasury -= amount
+        rival.treasury += amount // 2
+        self.register_diplomacy_memory(other, faction, min(0.5, amount / 200))
+        mission = self.diplomacy_missions.get(faction, {}).get(other)
+        if mission and mission.get("type") == "gift" and not mission.get("completed"):
+            mission["progress"] += amount
+            if mission["progress"] >= mission.get("value", 0):
+                mission["completed"] = True
+                self.register_diplomacy_memory(faction, other, 0.25)
+        self.add_event(f"{faction} presents {other} a gift of {amount} gold")
+        return True
+
+    def evaluate_maritime_threats(self) -> None:
+        previous = {fac: dict(threats) for fac, threats in self.trade_threats.items()}
+        self.trade_threats = {fac: {} for fac in self.factions}
+        for faction, fac_state in self.factions.items():
+            origin = self.faction_capital(faction)
+            if not origin:
+                continue
+            origin_neighbors = REGIONS[origin].neighbors if origin in REGIONS else []
+            naval_enemies = [army for army in self.armies if army.has_naval() and army.faction != faction]
+            threat_level = 0
+            threat_reason = ""
+            for army in naval_enemies:
+                if army.location == origin:
+                    threat_level = 2
+                    threat_reason = f"{army.faction} fleet blockades the capital"
+                    break
+                if army.location in origin_neighbors and is_sea_lane(army.location, origin):
+                    threat_level = max(threat_level, 1)
+                    threat_reason = f"{army.faction} raiders prowl the sea-lanes"
+            partners = [partner for partner, active in fac_state.diplomacy.trade.items() if active]
+            for partner in partners:
+                previous_level = previous.get(faction, {}).get(partner, {}).get("level", 0)
+                if threat_level:
+                    self.trade_threats[faction][partner] = {
+                        "level": threat_level,
+                        "reason": threat_reason,
+                    }
+                    if previous_level < threat_level:
+                        self.add_event(
+                            f"{faction} trade with {partner} threatened: {threat_reason}"
+                        )
+                else:
+                    self.trade_threats[faction][partner] = {
+                        "level": 0,
+                        "reason": "Sea lanes clear",
+                    }
+                    if previous_level > 0:
+                        self.add_event(f"{faction} trade routes to {partner} secured")
 
     def reveal_region(self, faction: str, region: str) -> None:
         self.fog_of_war.setdefault(faction, [])
@@ -474,6 +708,8 @@ class GameState:
             duration = rng.randint(4, 6)
         region.governor_trait = trait
         region.governor_turns = duration
+        if region.governor_level <= 0:
+            region.governor_level = 1
         if announce_for and region.owner == announce_for:
             desc = GOVERNOR_TRAITS.get(trait, {}).get("description", trait.title())
             self.add_event(f"Governor in {REGIONS[region.key].name}: {desc}")
@@ -486,6 +722,37 @@ class GameState:
             region.governor_turns = max(0, region.governor_turns - 1)
             if region.governor_turns <= 0:
                 self.assign_governor_trait(region, announce_for=announce_for, rng=rng)
+
+    def _tick_governor_loyalty(self, announce_for: Optional[str]) -> None:
+        rng = self.rng()
+        for region in self.regions.values():
+            if region.owner not in self.factions:
+                continue
+            supply = self.region_has_supply(region.owner, region.key)
+            delta = 0.01
+            if not supply:
+                delta = -0.08
+            elif region.stability < 0.6:
+                delta = -0.03
+            elif region.stability > 1.1:
+                delta = 0.02
+            event_mod = self.seasonal_event_modifier("stability", 0.0)
+            delta += event_mod * 0.5
+            region.governor_loyalty = max(0.0, min(1.5, region.governor_loyalty + delta))
+            if region.governor_loyalty <= 0.2 and rng.random() < 0.25:
+                region.stability = max(0.2, region.stability - 0.1)
+                if announce_for and region.owner == announce_for:
+                    self.add_event(
+                        f"Governor unrest in {REGIONS[region.key].name} undermines control!"
+                    )
+                region.governor_loyalty = 0.4
+            if region.governor_loyalty > 1.2 and region.governor_level < 5:
+                region.governor_level += 1
+                region.governor_loyalty = 0.9
+                if announce_for and region.owner == announce_for:
+                    self.add_event(
+                        f"Governor of {REGIONS[region.key].name} gains renown (level {region.governor_level})"
+                    )
 
     def governor_trait_bonus(self, region: Optional[RegionState], key: str, default: float = 0.0) -> float:
         if region is None:
@@ -512,7 +779,8 @@ class GameState:
         if not patrols:
             return 0
         trade_routes = sum(1 for active in fac_state.diplomacy.trade.values() if active)
-        base = 6 * len(patrols)
+        naval_mod = 1.0 + self.seasonal_event_modifier("naval", 0.0)
+        base = int(6 * len(patrols) * max(0.4, naval_mod))
         return base + trade_routes * 2
 
     def set_patrol(self, army: Army, enabled: bool) -> None:
@@ -529,6 +797,7 @@ class GameState:
                 self.add_event(f"{army.faction} patrol stood down near {REGIONS[army.location].name}")
             army.patrol_target = None
             army.patrol_turns = 0
+        self.evaluate_maritime_threats()
 
     def tick_patrols(self) -> None:
         for army in self.armies:
@@ -555,6 +824,11 @@ class GameState:
             self.factions[previous_owner].capital_upgrade = 0
         if previous_owner != new_owner:
             self.add_event(f"{new_owner} seized {REGIONS[region_key].name}")
+        mission = self.diplomacy_missions.get(new_owner, {})
+        for rival, data in mission.items():
+            if data.get("type") == "mission" and data.get("value") == region_key:
+                data["completed"] = True
+                data["progress"] = 1
 
     def perform_espionage(self, army: Army, target_region: str) -> str:
         if "spy" not in army.units:
@@ -568,30 +842,64 @@ class GameState:
         if target_state.owner == army.faction:
             return "Cannot spy on friendly region"
         rng = self.rng()
-        base_chance = 0.6
+        base_chance = 0.55
         origin_state = self.regions.get(army.location)
         bonus = self.governor_trait_bonus(origin_state, "spy_bonus", 0.0) if origin_state else 0.0
         chance = min(0.95, base_chance + bonus)
         army.movement = 0
-        if rng.random() <= chance:
+        success = rng.random() <= chance
+        operation = "scout"
+        options = ["scout", "sabotage", "unrest"]
+        if not target_state.buildings:
+            options.remove("sabotage") if "sabotage" in options else None
+        if target_state.stability > 1.1:
+            options.remove("unrest") if "unrest" in options else None
+        if options:
+            operation = rng.choice(options)
+        if success:
             self.reveal_region(army.faction, target_region)
-            target_state.stability = max(0.2, target_state.stability - 0.06)
-            if target_state.garrison:
+            if operation == "scout":
+                target_state.stability = max(0.2, target_state.stability - 0.04)
+                self.add_event(
+                    f"Spy charts {REGIONS[target_region].name}; defenses catalogued."
+                )
+                loot = int(target_state.economy * 0.1)
+                self.factions[army.faction].treasury += loot
+                self.add_event(f"Spy lifts {loot} gold in courier satchels")
+            elif operation == "sabotage":
+                building_key = next(iter(target_state.buildings))
+                target_state.buildings[building_key] = max(0, target_state.buildings[building_key] - 1)
+                self.add_event(
+                    f"Saboteurs cripple {REGIONS[target_region].name}'s {building_key}"
+                )
+                target_state.stability = max(0.2, target_state.stability - 0.08)
+            elif operation == "unrest":
+                target_state.stability = max(0.2, target_state.stability - 0.15)
+                self.add_event(
+                    f"Spy foments dissent in {REGIONS[target_region].name}; stability plunges"
+                )
+            if target_state.garrison and operation != "scout":
                 lost = target_state.garrison.pop(0)
                 self.add_event(
-                    f"Spy disrupted {REGIONS[target_region].name}, eliminating {UNITS[lost].name}"
+                    f"Garrison loses {UNITS[lost].name} amid the chaos"
                 )
-            else:
-                self.add_event(f"Spy maps {REGIONS[target_region].name}; defenses seem light")
+            mission = self.diplomacy_missions.get(army.faction, {}).get(target_state.owner)
+            if mission and mission.get("type") == "mission" and mission.get("value") == target_region:
+                mission["completed"] = True
+                mission["progress"] = 1
+                self.register_diplomacy_memory(army.faction, target_state.owner, -0.2)
             return "Espionage succeeded"
-        if rng.random() < 0.5:
+        detected = rng.random() < 0.6
+        if detected:
             try:
                 army.units.remove("spy")
-                self.add_event("Spy was captured during the attempt")
+                self.add_event("Spy captured and executed")
             except ValueError:
                 pass
+            self.register_diplomacy_memory(target_state.owner, army.faction, -0.3)
         else:
-            self.add_event("Spy forced to retreat without intel")
+            self.add_event("Spy escapes but brings no intel")
+            self.register_diplomacy_memory(target_state.owner, army.faction, -0.1)
         return "Espionage failed"
 
     def record_battle(
@@ -644,6 +952,13 @@ class GameState:
         patrol_bonus = self.naval_patrol_income_bonus(faction)
         if patrol_bonus:
             income += patrol_bonus
+        mission = self.diplomacy_missions.get(faction, {})
+        for rival, data in mission.items():
+            if data.get("type") == "escort" and not data.get("completed"):
+                if self.count_patrols(faction) >= data.get("value", 0):
+                    data["completed"] = True
+                    data["progress"] = data.get("value", 0)
+                    self.register_diplomacy_memory(faction, rival, 0.2)
         upkeep = self.upkeep_cost(faction)
         fac_state.treasury += income - upkeep
         if patrol_bonus:
@@ -660,6 +975,7 @@ class GameState:
         trait_bonus = self.governor_trait_bonus(region, "income", 0.0)
         if trait_bonus:
             base = int(base * (1.0 + trait_bonus))
+        base = int(base * (1.0 + self.seasonal_event_modifier("income", 0.0)))
         capital_key = self.faction_capital(region.owner)
         faction_state = self.factions.get(region.owner)
         if capital_key and capital_key == region.key and faction_state:
@@ -667,7 +983,8 @@ class GameState:
             if upgrade:
                 base = int(base * (1.05 + 0.05 * upgrade))
         if not self.region_has_supply(region.owner, region.key):
-            base = int(base * 0.5)
+            penalty = 0.5 + self.seasonal_event_modifier("supply", 0.0)
+            base = int(base * max(0.2, penalty))
         return base
 
     def region_has_supply(self, faction: str, region_key: str) -> bool:
@@ -837,6 +1154,7 @@ class GameState:
             trait_relief = self.governor_trait_bonus(region, "stability", 0.0)
             if trait_relief:
                 penalty = max(0.01, penalty - trait_relief / 2)
+            penalty += -self.seasonal_event_modifier("supply", 0.0)
             region.stability = max(0.2, region.stability - penalty)
             if region.unsupplied_turns % 2 == 0 and region.garrison:
                 lost = region.garrison.pop(0)

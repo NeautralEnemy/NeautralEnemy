@@ -14,6 +14,7 @@ class AIController:
     def __init__(self, state: GameState, faction: str) -> None:
         self.state = state
         self.faction = faction
+        self.personality = state.factions[faction].personality
 
     def take_turn(self) -> None:
         self.manage_diplomacy()
@@ -28,20 +29,31 @@ class AIController:
             if other == self.faction:
                 continue
             relation = diplomacy.get_relation(self.state, self.faction, other)
+            memory = self.state.ai_memory.get(self.faction, {}).get(other, 0.0)
+            mission = self.state.diplomacy_missions.get(self.faction, {}).get(other)
             if relation == "war":
                 their_regions = len(self.state.regions_owned_by(other))
-                if my_regions < their_regions and rng.random() < 0.35:
-                    diplomacy.offer_peace(self.state, self.faction, other)
+                desire_peace = self.personality.get("diplomacy", 0.5) * 0.4
+                desire_peace += max(0.0, memory) * 0.2
+                if my_regions < their_regions:
+                    desire_peace += 0.2
+                if rng.random() < desire_peace:
+                    diplomacy.offer_peace(self.state, self.faction, other, bonus=memory * 0.1)
                 continue
             border = self._has_border_with(other)
-            if border and rng.random() < 0.18:
+            aggression = self.personality.get("aggression", 0.5)
+            if border and rng.random() < max(0.05, aggression * 0.25 - memory * 0.1):
                 diplomacy.declare_war(self.state, self.faction, other)
                 continue
             has_trade = self.state.factions[self.faction].diplomacy.trade.get(other, False)
-            if not has_trade and relation != "war" and rng.random() < 0.22:
-                diplomacy.request_trade(self.state, self.faction, other)
-            if relation == "neutral" and border and rng.random() < 0.08:
-                diplomacy.propose_alliance(self.state, self.faction, other)
+            if mission and mission.get("type") == "gift" and not mission.get("completed"):
+                deficit = mission.get("value", 0) - mission.get("progress", 0)
+                if deficit > 0 and self.state.factions[self.faction].treasury > deficit:
+                    self.state.offer_sweetener(self.faction, other, deficit)
+            if not has_trade and relation != "war" and rng.random() < self.personality.get("diplomacy", 0.5) * 0.35:
+                diplomacy.request_trade(self.state, self.faction, other, bonus=memory * 0.1)
+            if relation == "neutral" and border and rng.random() < self.personality.get("diplomacy", 0.5) * 0.2:
+                diplomacy.propose_alliance(self.state, self.faction, other, bonus=memory * 0.1)
 
     def build_infrastructure(self) -> None:
         fac = self.state.factions[self.faction]

@@ -1,7 +1,7 @@
 """Diplomacy helpers."""
 from __future__ import annotations
 
-import random
+from typing import Optional
 
 from core.state import GameState
 
@@ -20,6 +20,19 @@ def set_relation(state: GameState, faction: str, other: str, relation: str) -> N
         state.factions[faction].diplomacy.trade.pop(other, None)
         state.factions[other].diplomacy.trade.pop(faction, None)
     state.add_event(f"{faction} and {other} are now {relation}")
+    swing = -0.4 if relation == "war" else 0.3
+    state.register_diplomacy_memory(faction, other, swing)
+    state.register_diplomacy_memory(other, faction, swing)
+
+
+def _mission_bonus(state: GameState, faction: str, other: str) -> float:
+    mission = state.diplomacy_missions.get(faction, {}).get(other)
+    bonus = 0.0
+    if mission and mission.get("completed"):
+        bonus += 0.2
+    other_memory = state.ai_memory.get(other, {}).get(faction, 0.0)
+    bonus += other_memory * 0.15
+    return bonus
 
 
 def declare_war(state: GameState, faction: str, other: str) -> bool:
@@ -33,7 +46,7 @@ def declare_war(state: GameState, faction: str, other: str) -> bool:
     return True
 
 
-def offer_peace(state: GameState, faction: str, other: str) -> bool:
+def offer_peace(state: GameState, faction: str, other: str, bonus: float = 0.0) -> bool:
     """Attempt to end a war and return to neutrality."""
 
     if other not in state.factions or faction == other:
@@ -54,7 +67,9 @@ def offer_peace(state: GameState, faction: str, other: str) -> bool:
     if other_regions:
         average = sum(reg.stability for reg in other_regions) / len(other_regions)
         base += min(0.15, max(-0.15, average - 0.6))
-    if rng.random() <= max(0.1, min(0.9, base)):
+    base += _mission_bonus(state, faction, other)
+    base += bonus
+    if rng.random() <= max(0.1, min(0.95, base)):
         set_relation(state, faction, other, "neutral")
         state.factions[faction].diplomacy.trade.setdefault(other, False)
         state.factions[other].diplomacy.trade.setdefault(faction, False)
@@ -64,7 +79,7 @@ def offer_peace(state: GameState, faction: str, other: str) -> bool:
     return False
 
 
-def propose_alliance(state: GameState, faction: str, other: str) -> bool:
+def propose_alliance(state: GameState, faction: str, other: str, bonus: float = 0.0) -> bool:
     """Attempt to elevate relations to an alliance."""
 
     if other not in state.factions or faction == other:
@@ -87,7 +102,9 @@ def propose_alliance(state: GameState, faction: str, other: str) -> bool:
         base += 0.05
     elif treasury_ratio < 0.8:
         base -= 0.05
-    if rng.random() <= max(0.05, min(0.85, base)):
+    base += _mission_bonus(state, faction, other)
+    base += bonus
+    if rng.random() <= max(0.05, min(0.9, base)):
         set_relation(state, faction, other, "allied")
         state.factions[faction].diplomacy.trade[other] = True
         state.factions[other].diplomacy.trade[faction] = True
@@ -97,7 +114,7 @@ def propose_alliance(state: GameState, faction: str, other: str) -> bool:
     return False
 
 
-def request_trade(state: GameState, faction: str, other: str) -> bool:
+def request_trade(state: GameState, faction: str, other: str, bonus: float = 0.0) -> bool:
     rng = state.rng()
     relation = get_relation(state, faction, other)
     if relation == "war":
@@ -107,10 +124,14 @@ def request_trade(state: GameState, faction: str, other: str) -> bool:
     if relation == "allied":
         base = 0.75
     chance = base * state.factions[faction].trade_modifier() * state.factions[other].trade_modifier()
+    chance += _mission_bonus(state, faction, other)
+    chance += bonus
     if rng.random() < min(0.95, chance):
         state.factions[faction].diplomacy.trade[other] = True
         state.factions[other].diplomacy.trade[faction] = True
         state.add_event(f"{faction} agreed on trade with {other}")
+        state.register_diplomacy_memory(other, faction, 0.15)
+        state.evaluate_maritime_threats()
         return True
     state.add_event(f"{other} refused trade with {faction}")
     return False
@@ -126,5 +147,11 @@ def trade_income_bonus(state: GameState, faction: str) -> int:
         if relation == "war":
             continue
         base = 12 if relation == "allied" else 10
-        bonus += int(base * fac.trade_modifier())
+        threat = state.trade_threats.get(faction, {}).get(partner, {"level": 0})
+        modifier = 1.0
+        if threat["level"] == 1:
+            modifier = 0.6
+        elif threat["level"] >= 2:
+            modifier = 0.15
+        bonus += int(base * fac.trade_modifier() * modifier)
     return bonus

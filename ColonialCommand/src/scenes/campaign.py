@@ -44,6 +44,7 @@ class CampaignScene(SceneBase):
         self._advisor_tip: str = ""
         self._advisor_timer: float = 0.0
         self._trade_timer: float = 0.0
+        self._threat_pulse: float = 0.0
         self.recruit_cycle: dict[str, int] = {}
         self.build_cycle: dict[str, int] = {}
         self.spy_mode: bool = False
@@ -506,6 +507,7 @@ class CampaignScene(SceneBase):
             return
         relation = diplomacy.get_relation(self.state, PLAYER_FACTION, target)
         trade_active = self.state.factions[PLAYER_FACTION].diplomacy.trade.get(target, False)
+        mission = self.state.diplomacy_missions.get(PLAYER_FACTION, {}).get(target)
         self._diplomacy_buttons.clear()
 
         def make_button(label: str, callback, enabled: bool, tip: str) -> None:
@@ -525,6 +527,12 @@ class CampaignScene(SceneBase):
             self._offer_peace,
             relation == "war",
             f"Sue for peace with {target}",
+        )
+        make_button(
+            "Gift",
+            self._offer_gift,
+            relation != "war" and self.state.factions[PLAYER_FACTION].treasury >= 25,
+            "Send a goodwill payment to sway talks",
         )
         if trade_active:
             make_button(
@@ -546,6 +554,13 @@ class CampaignScene(SceneBase):
             relation != "war" and relation != "allied",
             f"Seek alliance with {target}",
         )
+        if mission and not mission.get("completed"):
+            make_button(
+                "Mission",
+                self._announce_mission,
+                False,
+                mission.get("description", ""),
+            )
 
     def _position_diplomacy_buttons(self, rect: pygame.Rect) -> None:
         if not self._diplomacy_buttons:
@@ -591,6 +606,7 @@ class CampaignScene(SceneBase):
         if target in self.state.factions:
             self.state.factions[target].diplomacy.trade[PLAYER_FACTION] = False
         self.state.add_event(f"Trade pact with {target} cancelled")
+        self.state.evaluate_maritime_threats()
         self._refresh_diplomacy_buttons()
 
     def _propose_alliance(self) -> None:
@@ -599,6 +615,30 @@ class CampaignScene(SceneBase):
             return
         diplomacy.propose_alliance(self.state, PLAYER_FACTION, target)
         self._refresh_diplomacy_buttons()
+
+    def _offer_gift(self) -> None:
+        target = self._selected_diplomacy_target
+        if not target:
+            return
+        mission = self.state.diplomacy_missions.get(PLAYER_FACTION, {}).get(target)
+        amount = 50
+        if mission and mission.get("type") == "gift" and not mission.get("completed"):
+            deficit = mission.get("value", 0) - mission.get("progress", 0)
+            amount = max(25, min(120, deficit))
+        if self.state.offer_sweetener(PLAYER_FACTION, target, amount):
+            self.message_log.add(f"Gift of {amount} gold sent to {target}")
+        else:
+            self.message_log.add("Gift failed: treasury too low")
+        self._refresh_diplomacy_buttons()
+
+    def _announce_mission(self) -> None:
+        target = self._selected_diplomacy_target
+        if not target:
+            return
+        mission = self.state.diplomacy_missions.get(PLAYER_FACTION, {}).get(target)
+        if mission:
+            text = mission.get("description", "No active mission")
+            self.message_log.add(f"Mission: {text}")
 
     def _research(self) -> None:
         categories = list(TECH_TREE.keys())
@@ -674,6 +714,7 @@ class CampaignScene(SceneBase):
         else:
             self._highlight_time = 0.0
         self._trade_timer += dt
+        self._threat_pulse = (self._threat_pulse + dt) % math.tau
         if self._trade_timer > math.tau:
             self._trade_timer -= math.tau
         events = self.state.last_events
@@ -714,27 +755,55 @@ class CampaignScene(SceneBase):
         self._draw_map(surface, palette)
         hud = pygame.Rect(4, 4, 312, 40)
         gfx.draw_panel(surface, hud, palette)
-        header = f"{PLAYER_FACTION} | Treasury {self.state.factions[PLAYER_FACTION].treasury} | Turn {self.state.turn} {SEASONS[self.state.season_index]} {self.state.year}"
+        header = (
+            f"{PLAYER_FACTION} | Treasury {self.state.factions[PLAYER_FACTION].treasury} | "
+            f"Turn {self.state.turn} {SEASONS[self.state.season_index]} {self.state.year}"
+        )
         gfx.draw_text(surface, header, (hud.x + 4, hud.y + 4), color_index=25, palette_name=palette)
+        line_y = hud.y + 14
         weather_line = self.state.weather_summary()
         if weather_line:
             gfx.draw_text(
                 surface,
                 f"Weather: {weather_line[:38]}",
-                (hud.x + 4, hud.y + 14),
+                (hud.x + 4, line_y),
                 color_index=20,
                 palette_name=palette,
             )
+            line_y += 10
+        event_line = self.state.seasonal_event_text()
+        if event_line:
+            gfx.draw_text(
+                surface,
+                event_line[:46],
+                (hud.x + 4, line_y),
+                color_index=27,
+                palette_name=palette,
+            )
+            line_y += 10
         patrols = self.state.count_patrols(PLAYER_FACTION)
+        trade_threats = self.state.trade_threats.get(PLAYER_FACTION, {})
+        active_threats = sum(1 for data in trade_threats.values() if data.get("level"))
+        patrol_text = f"Patrols: {patrols}" if patrols else "Patrols: None"
         gfx.draw_text(
             surface,
-            f"Patrols: {patrols}",
-            (hud.x + 4, hud.y + 24),
+            patrol_text,
+            (hud.x + 4, line_y),
             color_index=17,
             palette_name=palette,
         )
+        if active_threats:
+            pulse = (math.sin(self._threat_pulse * 3.0) + 1.0) * 0.5
+            color = 28 if pulse > 0.5 else 24
+            gfx.draw_text(
+                surface,
+                f"Trade Threats: {active_threats}",
+                (hud.right - 120, hud.y + 24),
+                color_index=color,
+                palette_name=palette,
+            )
         if self.selected_region:
-            info_rect = pygame.Rect(4, 48, 180, 124)
+            info_rect = pygame.Rect(4, 48, 180, 136)
             gfx.draw_panel(surface, info_rect, palette)
             region = self.state.regions[self.selected_region]
             gfx.draw_text(
@@ -777,9 +846,16 @@ class CampaignScene(SceneBase):
                 (info_rect.x + 4, info_rect.y + 48),
                 palette_name=palette,
             )
+            supply_ok = self.state.region_has_supply(region.owner, region.key)
             icon_y = info_rect.y + 60
             if region.garrison:
-                self._draw_unit_icons(surface, region.garrison[:6], (info_rect.x + 18, icon_y), palette)
+                self._draw_unit_icons(
+                    surface,
+                    region.garrison[:6],
+                    (info_rect.x + 18, icon_y),
+                    palette,
+                    unsupplied=not supply_ok,
+                )
             else:
                 gfx.draw_text(
                     surface,
@@ -787,7 +863,6 @@ class CampaignScene(SceneBase):
                     (info_rect.x + 4, icon_y - 4),
                     palette_name=palette,
                 )
-            supply_ok = self.state.region_has_supply(region.owner, region.key)
             supply_text = "Supplied" if supply_ok else "Cut Off"
             supply_color = 24 if supply_ok else 28
             gfx.draw_text(
@@ -826,6 +901,12 @@ class CampaignScene(SceneBase):
                 (info_rect.x + 4, info_rect.y + 106),
                 palette_name=palette,
             )
+            gfx.draw_text(
+                surface,
+                f"Gov Level {region.governor_level} | Loyalty {region.governor_loyalty:.2f}",
+                (info_rect.x + 4, info_rect.y + 114),
+                palette_name=palette,
+            )
             building_bits = []
             for key in ORDERED_BUILDINGS:
                 level = region.buildings.get(key, 0)
@@ -835,7 +916,7 @@ class CampaignScene(SceneBase):
             gfx.draw_text(
                 surface,
                 f"Builds: {building_text}",
-                (info_rect.x + 4, info_rect.y + 114),
+                (info_rect.x + 4, info_rect.y + 122),
                 palette_name=palette,
             )
             if region.project:
@@ -844,7 +925,51 @@ class CampaignScene(SceneBase):
                 gfx.draw_text(
                     surface,
                     f"Project: {label} ({region.project.turns_left}t)",
-                    (info_rect.x + 4, info_rect.y + 122),
+                    (info_rect.x + 4, info_rect.y + 130),
+                    palette_name=palette,
+                )
+        if self.selected_army:
+            army_rect = pygame.Rect(188, 48, 124, 46)
+            gfx.draw_panel(surface, army_rect, palette)
+            army = self.selected_army
+            gfx.draw_text(
+                surface,
+                f"Army: {army.faction[:10]}",
+                (army_rect.x + 4, army_rect.y + 4),
+                color_index=23,
+                palette_name=palette,
+            )
+            location = REGIONS[army.location].name if army.location in REGIONS else army.location
+            gfx.draw_text(
+                surface,
+                location[:14],
+                (army_rect.x + 4, army_rect.y + 14),
+                color_index=20,
+                palette_name=palette,
+            )
+            supply_ok = self.state.region_has_supply(army.faction, army.location)
+            supply_color = 24 if supply_ok else 28
+            gfx.draw_text(
+                surface,
+                f"XP {army.experience} | Move {army.movement}",
+                (army_rect.x + 4, army_rect.y + 24),
+                color_index=20,
+                palette_name=palette,
+            )
+            self._draw_unit_icons(
+                surface,
+                army.units,
+                (army_rect.x + 18, army_rect.y + 36),
+                palette,
+                army=army,
+                unsupplied=not supply_ok,
+            )
+            if not supply_ok:
+                gfx.draw_text(
+                    surface,
+                    "Out of supply",
+                    (army_rect.right - 70, army_rect.y + 24),
+                    color_index=supply_color,
                     palette_name=palette,
                 )
         self._draw_diplomacy_panel(surface, palette)
@@ -941,14 +1066,32 @@ class CampaignScene(SceneBase):
             if not dest_key or dest_key not in REGIONS:
                 continue
             dest = REGIONS[dest_key].location
-            pygame.draw.line(surface, colors[21], origin, dest, 1)
+            threat = self.state.trade_threats.get(PLAYER_FACTION, {}).get(partner, {})
+            level = threat.get("level", 0)
+            color_index = 21
+            if level == 1:
+                color_index = 24
+            elif level >= 2:
+                color_index = 28
+            pygame.draw.line(surface, colors[color_index], origin, dest, 1)
             t = (self._trade_timer * 0.3 + idx * 0.2) % 1.0
             px = int(origin[0] + (dest[0] - origin[0]) * t)
             py = int(origin[1] + (dest[1] - origin[1]) * t)
-            pygame.draw.circle(surface, colors[25], (px, py), 1)
+            marker_color = colors[25]
+            if level >= 1:
+                pulse = (math.sin(self._threat_pulse * 4.0 + idx) + 1.0) * 0.5
+                marker_color = colors[28 if pulse > 0.5 else 24]
+            pygame.draw.circle(surface, marker_color, (px, py), 1)
 
     def _draw_unit_icons(
-        self, surface: pygame.Surface, units: list[str], origin: tuple[int, int], palette: str
+        self,
+        surface: pygame.Surface,
+        units: list[str],
+        origin: tuple[int, int],
+        palette: str,
+        *,
+        army: Optional[Army] = None,
+        unsupplied: bool = False,
     ) -> None:
         if not units:
             return
@@ -966,7 +1109,13 @@ class CampaignScene(SceneBase):
         for idx, unit in enumerate(units[:6]):
             icon_type = icon_map.get(unit, "default")
             center = (x_start + idx * spacing, y_center)
-            gfx.draw_icon(surface, center, icon_type, palette)
+            badges = {"unsupplied": unsupplied}
+            if army:
+                badges["veterancy"] = army.experience
+                badges["patrol"] = army.is_patrolling()
+            if unit == "spy":
+                badges["spy"] = True
+            gfx.draw_icon(surface, center, icon_type, palette, badges=badges)
 
     def _draw_research_banner(self, surface: pygame.Surface, palette: str) -> None:
         rect = pygame.Rect(40, 4, 240, 16)
@@ -1104,6 +1253,8 @@ class CampaignScene(SceneBase):
             self._refresh_diplomacy_buttons()
             target = self._selected_diplomacy_target
             relation = diplomacy.get_relation(self.state, PLAYER_FACTION, target)
+            mission = self.state.diplomacy_missions.get(PLAYER_FACTION, {}).get(target)
+            threat = self.state.trade_threats.get(PLAYER_FACTION, {}).get(target)
             gfx.draw_text(
                 surface,
                 f"Actions: {target[:10]}",
@@ -1118,6 +1269,25 @@ class CampaignScene(SceneBase):
                 color_index=18,
                 palette_name=palette,
             )
+            if mission:
+                status = "Done" if mission.get("completed") else "Active"
+                detail = mission.get("description", "")[:26]
+                gfx.draw_text(
+                    surface,
+                    f"Mission: {status} {detail}",
+                    (action_rect.x + 2, action_rect.y + 18),
+                    color_index=20,
+                    palette_name=palette,
+                )
+            if threat and threat.get("level"):
+                color = 28 if threat.get("level") >= 2 else 24
+                gfx.draw_text(
+                    surface,
+                    f"Threat: {threat.get('reason', '')[:24]}",
+                    (action_rect.x + 2, action_rect.y + 26),
+                    color_index=color,
+                    palette_name=palette,
+                )
             self._position_diplomacy_buttons(action_rect)
         else:
             self._diplomacy_buttons.clear()
