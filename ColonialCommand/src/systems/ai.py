@@ -26,9 +26,18 @@ class AIController:
         if not owned:
             return
         richest = max(owned, key=lambda r: r.economy)
-        richest.garrison.append("militia")
-        fac.treasury -= UNITS["militia"].upkeep * 2
-        self.state.add_event(f"{self.faction} raised militia in {REGIONS[richest.key].name}")
+        options = self.state.available_recruits(richest)
+        if not options:
+            return
+        unit_key = options[0]
+        cost = self.state.recruit_cost(unit_key)
+        if fac.treasury < cost:
+            return
+        richest.recruit_queue.append(unit_key)
+        fac.treasury -= cost
+        self.state.add_event(
+            f"{self.faction} queued {UNITS[unit_key].name} in {REGIONS[richest.key].name}"
+        )
 
     def perform_moves(self) -> None:
         for army in list(self.state.armies):

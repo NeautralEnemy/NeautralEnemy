@@ -42,6 +42,7 @@ class CampaignScene(SceneBase):
         self._advisor_tip: str = ""
         self._advisor_timer: float = 0.0
         self._trade_timer: float = 0.0
+        self.recruit_cycle: dict[str, int] = {}
 
     @property
     def state(self) -> GameState:
@@ -57,6 +58,7 @@ class CampaignScene(SceneBase):
                 self.selected_region = visible[0]
             else:
                 self.selected_region = next(iter(self.state.regions))
+        self._update_recruit_tooltip()
         if not self._entered:
             self._last_event_count = 0
             self.message_log.clear()
@@ -71,10 +73,7 @@ class CampaignScene(SceneBase):
                 pygame.Rect(8, 150, 60, 18),
                 "Recruit",
                 self._recruit,
-                tooltip=(
-                    "Recruit Line Infantry\n"
-                    f"Cost: 60\nUpkeep: {UNITS['line'].upkeep}/turn"
-                ),
+                tooltip="Select a region to view recruitment options",
             ),
             Button(
                 pygame.Rect(72, 150, 60, 18),
@@ -149,6 +148,7 @@ class CampaignScene(SceneBase):
             if closest in self.state.fog_of_war.get(PLAYER_FACTION, []):
                 self.selected_region = closest
                 self._select_army_at_region(closest)
+                self._update_recruit_tooltip()
 
     def _select_army_at_region(self, region_key: str) -> None:
         self.selected_army = None
@@ -157,6 +157,32 @@ class CampaignScene(SceneBase):
                 self.selected_army = army
                 break
         self._set_moving(False)
+
+    def _update_recruit_tooltip(self) -> None:
+        if not self.buttons:
+            return
+        button = self.buttons[0]
+        if not self.selected_region:
+            button.tooltip = "Select a region to recruit"
+            return
+        region = self.state.regions[self.selected_region]
+        if region.owner != PLAYER_FACTION:
+            button.tooltip = "Capture this region to unlock recruitment"
+            return
+        options = self.state.available_recruits(region)
+        if not options:
+            button.tooltip = "No units available"
+            return
+        lines = [
+            "Recruit (cycles each click)",
+        ]
+        for unit_key in options[:4]:
+            unit = UNITS[unit_key]
+            cost = self.state.recruit_cost(unit_key)
+            lines.append(f"{unit.name}: Cost {cost} | Upkeep {unit.upkeep}")
+        if len(options) > 4:
+            lines.append("...")
+        button.tooltip = "\n".join(lines)
 
     def _attempt_move_to_point(self, pos: tuple[int, int]) -> None:
         if not self.selected_army:
@@ -175,6 +201,7 @@ class CampaignScene(SceneBase):
                 self.last_move = (self.state.armies.index(self.selected_army), old_location)
                 self._set_moving(False)
                 self.selected_region = closest
+                self._update_recruit_tooltip()
                 self._check_for_battle(self.selected_army)
 
     def _check_for_battle(self, army: Army) -> None:
@@ -204,14 +231,25 @@ class CampaignScene(SceneBase):
         if region.owner != PLAYER_FACTION:
             self.state.add_event("Can only recruit in owned regions")
             return
-        cost = 60
         fac = self.state.factions[PLAYER_FACTION]
+        options = self.state.available_recruits(region)
+        if not options:
+            self.state.add_event("No units available")
+            return
+        index = self.recruit_cycle.get(region.key, 0)
+        unit_key = options[index % len(options)]
+        cost = self.state.recruit_cost(unit_key)
         if fac.treasury < cost:
             self.state.add_event("Not enough funds")
             return
-        region.recruit_queue.append("line")
+        region.recruit_queue.append(unit_key)
         fac.treasury -= cost
-        self.state.add_event(f"Line Infantry training in {REGIONS[region.key].name}")
+        self.recruit_cycle[region.key] = (index + 1) % len(options)
+        unit_name = UNITS[unit_key].name
+        self.state.add_event(
+            f"Queued {unit_name} in {REGIONS[region.key].name} (Cost {cost})"
+        )
+        self._update_recruit_tooltip()
 
     def _build(self) -> None:
         if not self.selected_region:

@@ -34,20 +34,22 @@ class TacticalState:
     current_side: int = 0
     turn: int = 1
     terrain: Dict[Tuple[int, int], str] = field(default_factory=dict)
+    attacker_faction: str = ""
+    defender_faction: str = ""
 
     def alive_units(self, side: int) -> List[TacticalUnit]:
         return [u for u in self.units if u.side == side and u.hp > 0]
 
 
-def setup_battle(attacker: Army, defender: Army, rng: random.Random) -> TacticalState:
+def setup_battle(game_state: GameState, attacker: Army, defender: Army, rng: random.Random) -> TacticalState:
     units: List[TacticalUnit] = []
     for i, unit in enumerate(attacker.units):
         units.append(
             TacticalUnit(
                 side=0,
                 unit_type=unit,
-                hp=3,
-                morale=6 + attacker.experience,
+                hp=max(2, int(game_state.unit_defense_value(attacker.faction, unit) / 2)),
+                morale=int(6 * game_state.factions[attacker.faction].morale_modifier()) + attacker.experience,
                 position=(1, 1 + i),
                 veterancy=attacker.experience,
             )
@@ -57,8 +59,8 @@ def setup_battle(attacker: Army, defender: Army, rng: random.Random) -> Tactical
             TacticalUnit(
                 side=1,
                 unit_type=unit,
-                hp=3,
-                morale=6 + defender.experience,
+                hp=max(2, int(game_state.unit_defense_value(defender.faction, unit) / 2)),
+                morale=int(6 * game_state.factions[defender.faction].morale_modifier()) + defender.experience,
                 position=(BOARD_WIDTH - 2, 1 + i),
                 veterancy=defender.experience,
             )
@@ -71,15 +73,30 @@ def setup_battle(attacker: Army, defender: Army, rng: random.Random) -> Tactical
             if pos not in terrain:
                 terrain[pos] = kind
                 break
-    return TacticalState(attacker=attacker, defender=defender, units=units, terrain=terrain)
+    return TacticalState(
+        attacker=attacker,
+        defender=defender,
+        units=units,
+        terrain=terrain,
+        attacker_faction=attacker.faction,
+        defender_faction=defender.faction,
+    )
 
 
-def _attack_roll(rng: random.Random, unit: TacticalUnit, target: TacticalUnit, terrain: Dict[Tuple[int, int], str]) -> bool:
-    stats = UNITS[unit.unit_type]
-    base = stats.attack + max(0, unit.veterancy // 2)
+def _attack_roll(
+    game_state: GameState,
+    rng: random.Random,
+    state: TacticalState,
+    unit: TacticalUnit,
+    target: TacticalUnit,
+    terrain: Dict[Tuple[int, int], str],
+) -> bool:
+    attacker_faction = state.attacker_faction if unit.side == 0 else state.defender_faction
+    defender_faction = state.attacker_faction if target.side == 0 else state.defender_faction
+    base = game_state.unit_attack_value(attacker_faction, unit.unit_type) + max(0, unit.veterancy // 2)
     if unit.is_ranged():
         base += 1
-    defense = UNITS[target.unit_type].defense
+    defense = game_state.unit_defense_value(defender_faction, target.unit_type)
     atk_tile = terrain.get(unit.position)
     def_tile = terrain.get(target.position)
     if atk_tile == "forest":
@@ -92,11 +109,11 @@ def _attack_roll(rng: random.Random, unit: TacticalUnit, target: TacticalUnit, t
         defense += 1
     if def_tile == "fort":
         defense += 2
-    roll = rng.randint(1, base + 3)
+    roll = rng.randint(1, int(base + 3))
     return roll > defense
 
 
-def simulate_round(state: TacticalState, rng: random.Random) -> None:
+def simulate_round(game_state: GameState, state: TacticalState, rng: random.Random) -> None:
     for side in (0, 1):
         targets = state.alive_units(1 - side)
         if not targets:
@@ -105,7 +122,7 @@ def simulate_round(state: TacticalState, rng: random.Random) -> None:
             if not targets:
                 break
             target = rng.choice(targets)
-            if _attack_roll(rng, unit, target, state.terrain):
+            if _attack_roll(game_state, rng, state, unit, target, state.terrain):
                 target.hp -= 1
                 if target.hp <= 0:
                     targets.remove(target)
@@ -129,10 +146,10 @@ def determine_winner(state: TacticalState) -> int:
 
 def run_simulation(game_state: GameState, attacker: Army, defender: Army) -> int:
     rng = game_state.rng()
-    tactical = setup_battle(attacker, defender, rng)
+    tactical = setup_battle(game_state, attacker, defender, rng)
     winner = -1
     for _ in range(6):
-        simulate_round(tactical, rng)
+        simulate_round(game_state, tactical, rng)
         winner = determine_winner(tactical)
         if winner != -1:
             break

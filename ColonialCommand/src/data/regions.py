@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 
 @dataclass
@@ -41,3 +41,69 @@ REGIONS: Dict[str, RegionDef] = {
     "calcutta": RegionDef("calcutta", "Calcutta", (280, 130), ["bombay"], "tea", 36),
     "cape": RegionDef("cape", "Cape Colony", (220, 160), ["bombay", "caribbean"], "harbor", 30),
 }
+
+
+# Resources provide small economic bonuses or unlock unique recruitment options.
+# The values are interpreted elsewhere by the simulation code.
+RESOURCE_INCOME_BONUS: Dict[str, float] = {
+    "textiles": 0.10,
+    "wine": 0.05,
+    "silver": 0.12,
+    "spices": 0.08,
+    "trade": 0.08,
+    "timber": 0.04,
+    "iron": 0.06,
+    "manufactories": 0.10,
+    "coffee": 0.04,
+    "grain": 0.05,
+    "corsairs": 0.05,
+    "dates": 0.03,
+    "linen": 0.06,
+    "fur": 0.05,
+    "tobacco": 0.05,
+    "sugar": 0.07,
+    "rum": 0.06,
+    "dyes": 0.05,
+    "gold": 0.15,
+    "tea": 0.08,
+    "naval": 0.04,
+    "harbor": 0.04,
+}
+
+
+RESOURCE_RECRUIT_UNITS: Dict[str, List[str]] = {
+    "timber": ["artillery"],
+    "iron": ["artillery"],
+    "manufactories": ["artillery"],
+    "silver": ["cavalry"],
+    "gold": ["cavalry"],
+    "tobacco": ["cavalry"],
+    "naval": ["sloop", "frigate"],
+    "harbor": ["sloop", "frigate"],
+    "trade": ["sloop"],
+    "corsairs": ["sloop"],
+}
+
+
+# Simple list of adjacency pairs that represent ocean passages.
+SEA_LANES: Tuple[Tuple[str, str], ...] = (
+    ("dublin", "newyork"),
+    ("newyork", "caribbean"),
+    ("virginia", "caribbean"),
+    ("caribbean", "havana"),
+    ("caribbean", "azores"),
+    ("caribbean", "cape"),
+    ("lisbon", "azores"),
+    ("havana", "yucatan"),
+    ("yucatan", "newgranada"),
+    ("bombay", "cape"),
+    ("bombay", "calcutta"),
+)
+
+
+def is_sea_lane(a: str, b: str) -> bool:
+    """Return True if the edge between two regions should be treated as an ocean hop."""
+
+    pair = (a, b)
+    rev = (b, a)
+    return pair in SEA_LANES or rev in SEA_LANES

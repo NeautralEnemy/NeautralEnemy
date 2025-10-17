@@ -8,9 +8,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from data.factions import FACTIONS, MAJOR_FACTIONS
-from data.regions import REGIONS, RegionDef
+from data.regions import (
+    REGIONS,
+    RegionDef,
+    RESOURCE_INCOME_BONUS,
+    RESOURCE_RECRUIT_UNITS,
+    is_sea_lane,
+)
 from data.units import UNITS, UnitType
-from data.tech import TECH_TREE
+from data.tech import TECH_TREE, TechNode
 
 SAVES_DIR = Path("saves")
 
@@ -29,6 +35,14 @@ class Army:
         base = sum(UNITS[u].attack + UNITS[u].defense for u in self.units)
         return base + self.experience * 2
 
+    def has_naval(self) -> bool:
+        return any(unit in ("sloop", "frigate") for unit in self.units)
+
+    def max_speed(self) -> int:
+        if not self.units:
+            return 1
+        return max(UNITS[u].speed for u in self.units)
+
 
 @dataclass
 class RegionState:
@@ -42,7 +56,9 @@ class RegionState:
     recruit_queue: List[str] = field(default_factory=list)
 
     def income(self) -> int:
-        return int(self.economy * max(0.4, self.stability))
+        resource = REGIONS[self.key].resource
+        multiplier = 1.0 + RESOURCE_INCOME_BONUS.get(resource, 0.0)
+        return int(self.economy * multiplier * max(0.4, self.stability))
 
 
 @dataclass
@@ -59,14 +75,40 @@ class FactionState:
     research_queue: Optional[str] = None
     research_points: int = 0
     diplomacy: Diplomacy = field(default_factory=Diplomacy)
+    bonus_modifiers: Dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        faction = FACTIONS.get(self.name)
+        if faction:
+            for key, value in faction.modifiers.items():
+                self.bonus_modifiers.setdefault(key, 0.0)
+                if self.bonus_modifiers[key] == 0.0:
+                    self.bonus_modifiers[key] = value
+
+    def get_modifier(self, key: str) -> float:
+        return self.bonus_modifiers.get(key, 0.0)
+
+    def apply_bonus(self, bonus: Dict[str, float]) -> None:
+        for key, value in bonus.items():
+            self.bonus_modifiers[key] = self.bonus_modifiers.get(key, 0.0) + value
 
     def income_modifier(self) -> float:
-        faction = FACTIONS[self.name]
-        return 1.0 + faction.modifiers.get("income", 0.0)
+        return 1.0 + self.get_modifier("income")
 
     def morale_modifier(self) -> float:
-        faction = FACTIONS[self.name]
-        return 1.0 + faction.modifiers.get("morale", 0.0)
+        return 1.0 + self.get_modifier("morale")
+
+    def trade_modifier(self) -> float:
+        return 1.0 + self.get_modifier("trade")
+
+    def naval_modifier(self) -> float:
+        return 1.0 + self.get_modifier("naval")
+
+    def attack_bonus(self, unit_key: str) -> float:
+        bonus = self.get_modifier("attack")
+        if unit_key == "artillery":
+            bonus += self.get_modifier("artillery")
+        return bonus
 
 
 @dataclass
@@ -115,6 +157,12 @@ class GameState:
         seed_value = rng.randint(0, 999999)
         rng.seed(seed_value)
         factions = {name: FactionState(name=name, treasury=200) for name in MAJOR_FACTIONS}
+        for name, fac in factions.items():
+            for other in factions:
+                if other == name:
+                    continue
+                fac.diplomacy.relations.setdefault(other, "neutral")
+                fac.diplomacy.trade.setdefault(other, False)
         regions: Dict[str, RegionState] = {}
         assignments = list(MAJOR_FACTIONS)
         extended = assignments + ["Britain", "France", "Spain", "Netherlands"]
@@ -171,9 +219,16 @@ class GameState:
                     relations=fac.get("diplomacy", {}).get("relations", {}),
                     trade=fac.get("diplomacy", {}).get("trade", {}),
                 ),
+                bonus_modifiers=dict(fac.get("bonus_modifiers", {})),
             )
             for name, fac in data["factions"].items()
         }
+        for name, fac in factions.items():
+            for other in factions:
+                if other == name:
+                    continue
+                fac.diplomacy.relations.setdefault(other, "neutral")
+                fac.diplomacy.trade.setdefault(other, False)
         regions = {
             key: RegionState(
                 key=key,
@@ -304,6 +359,63 @@ class GameState:
         self.add_event(f"{faction} income {income} - upkeep {upkeep} = {income - upkeep}")
         return income - upkeep
 
+    def apply_tech_bonus(self, faction: str, node: TechNode) -> None:
+        fac = self.factions[faction]
+        fac.apply_bonus(node.bonus)
+
+    def unit_attack_value(self, faction: str, unit_key: str) -> float:
+        base = UNITS[unit_key].attack
+        return base + self.factions[faction].attack_bonus(unit_key)
+
+    def unit_defense_value(self, faction: str, unit_key: str) -> float:
+        base = UNITS[unit_key].defense
+        morale_bonus = self.factions[faction].morale_modifier()
+        return base * morale_bonus
+
+    def available_recruits(self, region: RegionState) -> List[str]:
+        options = ["militia", "line"]
+        resource = REGIONS[region.key].resource
+        for unit in RESOURCE_RECRUIT_UNITS.get(resource, []):
+            if unit not in options:
+                options.append(unit)
+        owner = region.owner
+        fac = self.factions.get(owner)
+        if fac:
+            military_tier = fac.tech_progress.get("military", 0)
+            naval_tier = fac.tech_progress.get("naval", 0)
+            if military_tier >= 1 and "cavalry" not in options:
+                options.append("cavalry")
+            if military_tier >= 2 and "artillery" not in options:
+                options.append("artillery")
+            if naval_tier >= 1 and "sloop" not in options:
+                options.append("sloop")
+            if naval_tier >= 2 and "frigate" not in options:
+                options.append("frigate")
+        return options
+
+    def recruit_cost(self, unit_key: str) -> int:
+        unit = UNITS[unit_key]
+        base = 30 + unit.upkeep * 3
+        if unit_key in ("artillery", "frigate"):
+            base += 25
+        if unit_key == "sloop":
+            base += 15
+        if unit_key == "cavalry":
+            base += 20
+        return base
+
+    def army_has_naval_support(self, army: Army, destination: Optional[str] = None) -> bool:
+        if army.has_naval():
+            return True
+        origin_resource = REGIONS[army.location].resource
+        if origin_resource in ("naval", "harbor", "trade", "corsairs"):
+            return self.factions[army.faction].naval_modifier() > 1.0
+        if destination:
+            dest_resource = REGIONS[destination].resource
+            if dest_resource in ("naval", "harbor", "trade", "corsairs"):
+                return self.factions[army.faction].naval_modifier() > 1.0
+        return False
+
     def queue_research(self, faction: str, category: str) -> bool:
         fac = self.factions[faction]
         if fac.research_queue == category:
@@ -330,6 +442,7 @@ class GameState:
             fac.research_points = 0
             self.add_event(f"{faction} researched {node.name}")
             self.research_notifications.append((faction, node.name))
+            self.apply_tech_bonus(faction, node)
             return node.key
         return None
 

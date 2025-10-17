@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Dict
 
 from core.state import GameState, Army
-from data.units import UNITS
 
 
 class BattleResult(Dict[str, int]):
@@ -12,10 +11,9 @@ class BattleResult(Dict[str, int]):
 
 
 def resolve_auto(state: GameState, attacker: Army, defender: Army) -> BattleResult:
-    atk_power = sum(UNITS[u].attack for u in attacker.units) + attacker.experience * 2
-    def_power = sum(UNITS[u].defense for u in defender.units) + defender.experience * 2
-    morale_bonus = state.factions[attacker.faction].morale_modifier()
-    atk_score = atk_power * morale_bonus
+    atk_power = sum(state.unit_attack_value(attacker.faction, u) for u in attacker.units) + attacker.experience * 2
+    def_power = sum(state.unit_defense_value(defender.faction, u) for u in defender.units) + defender.experience * 2
+    atk_score = atk_power
     def_score = def_power
     rng = state.rng()
     atk_roll = atk_score * (0.8 + rng.random() * 0.4)
