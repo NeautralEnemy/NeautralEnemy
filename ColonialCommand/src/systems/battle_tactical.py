@@ -1,4 +1,5 @@
-"""Simplified tactical battle simulation."""
+"""Simplified tactical battle simulation helpers."""
+
 from __future__ import annotations
 
 import random
@@ -89,6 +90,7 @@ def determine_winner(state: TacticalState) -> int:
 def run_simulation(game_state: GameState, attacker: Army, defender: Army) -> int:
     rng = game_state.rng()
     tactical = setup_battle(attacker, defender)
+    winner = -1
     for _ in range(6):
         simulate_round(tactical, rng)
         winner = determine_winner(tactical)
