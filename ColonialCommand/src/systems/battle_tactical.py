@@ -134,8 +134,10 @@ def _attack_roll(
         defense += 2
     if target.side == 1 and not state.defender_supplied:
         defense = max(1, defense - 1)
+    base = max(1.0, base * game_state.weather_attack_modifier())
+    defense = max(1.0, defense * game_state.weather_defense_modifier())
     roll = rng.randint(1, int(base + 3))
-    return roll > defense
+    return roll > int(round(defense))
 
 
 def simulate_round(game_state: GameState, state: TacticalState, rng: random.Random) -> None:
@@ -176,6 +178,8 @@ def run_simulation(
     location: Optional[str] = None,
 ) -> int:
     rng = game_state.rng()
+    attacker_start = len(attacker.units)
+    defender_start = len(defender.units)
     tactical = setup_battle(game_state, attacker, defender, rng, location=location)
     winner = -1
     for _ in range(6):
@@ -193,4 +197,16 @@ def run_simulation(
         attacker.units = attacker.units[:1]
         defender.units = defender.units[:1]
     game_state.add_event("Tactical battle resolved")
+    attacker_losses = max(0, attacker_start - len(attacker.units))
+    defender_losses = max(0, defender_start - len(defender.units))
+    winning_faction = attacker.faction if winner == 1 else defender.faction if winner == 0 else "Stalemate"
+    game_state.record_battle(
+        location=location or defender.location,
+        attacker=attacker.faction,
+        defender=defender.faction,
+        winner=winning_faction,
+        battle_type="tactical",
+        attacker_losses=attacker_losses,
+        defender_losses=defender_losses,
+    )
     return winner

@@ -105,6 +105,7 @@ class App:
         from scenes.settings import SettingsScene
         from scenes.help import HelpScene
         from scenes.tactical import TacticalScene
+        from scenes.ledger import LedgerScene
 
         self.scene_registry = {
             "menu": SceneEntry(lambda ctx: MenuScene(ctx)),
@@ -112,6 +113,7 @@ class App:
             "settings": SceneEntry(lambda ctx: SettingsScene(ctx)),
             "help": SceneEntry(lambda ctx: HelpScene(ctx)),
             "tactical": SceneEntry(lambda ctx: TacticalScene(ctx)),
+            "ledger": SceneEntry(lambda ctx: LedgerScene(ctx)),
         }
 
     def _context_factory(self) -> SceneContext:

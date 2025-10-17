@@ -46,9 +46,18 @@ BUILDINGS: Dict[str, BuildingDef] = {
         build_time=2,
         max_level=2,
     ),
+    "capital": BuildingDef(
+        key="capital",
+        name="Capital Works",
+        description="Expand the seat of government with parade grounds and arsenals.",
+        effect="Improves supply network, recruitment throughput, and capital defenses",
+        cost=110,
+        build_time=3,
+        max_level=3,
+    ),
 }
 
 
-ORDERED_BUILDINGS: List[str] = ["market", "fort", "culture"]
+ORDERED_BUILDINGS: List[str] = ["market", "fort", "culture", "capital"]
 """Stable iteration order for UI cycling and AI heuristics."""
 

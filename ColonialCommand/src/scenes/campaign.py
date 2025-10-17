@@ -27,6 +27,7 @@ class CampaignScene(SceneBase):
     def __init__(self, context) -> None:
         super().__init__(context)
         self.buttons: list[Button] = []
+        self.utility_buttons: list[Button] = []
         self.selected_region: Optional[str] = None
         self.selected_army: Optional[Army] = None
         self.last_move: Optional[tuple[int, str]] = None
@@ -35,7 +36,7 @@ class CampaignScene(SceneBase):
         self._last_event_count: int = 0
         self._entered: bool = False
         self._highlight_time: float = 0.0
-        self._hotkey_hint = "Hotkeys: H Help | U Undo | G +1000 | F Reveal"
+        self._hotkey_hint = "Hotkeys: H Help | U Undo | G +1000 | F Reveal | L Ledger | P Patrol | S Spy"
         self.objective_status: list[tuple[Objective, int, int]] = []
         self._active_event: Optional[StoryEvent] = None
         self._event_buttons: list[tuple[Button, EventChoice]] = []
@@ -45,6 +46,8 @@ class CampaignScene(SceneBase):
         self._trade_timer: float = 0.0
         self.recruit_cycle: dict[str, int] = {}
         self.build_cycle: dict[str, int] = {}
+        self.spy_mode: bool = False
+        self.utility_lookup: dict[str, Button] = {}
 
     @property
     def state(self) -> GameState:
@@ -53,7 +56,9 @@ class CampaignScene(SceneBase):
 
     def on_enter(self, **kwargs) -> None:
         self._build_buttons()
+        self._build_utility_buttons()
         self._sync_move_button_indicator()
+        self.spy_mode = False
         if not self.selected_region and self.state:
             visible = self.state.fog_of_war.get(PLAYER_FACTION, [])
             if visible:
@@ -103,14 +108,86 @@ class CampaignScene(SceneBase):
                 tooltip="End the turn and autosave",
             ),
         ]
+        self._update_utility_states()
+
+    def _build_utility_buttons(self) -> None:
+        self.utility_buttons = []
+        self.utility_lookup = {}
+        specs = [
+            ("Ledger", self._open_ledger, "ledger", pygame.K_l, "Review provincial income and supply"),
+            ("Patrol", self._toggle_patrol, "patrol", pygame.K_p, "Assign a naval patrol to protect trade"),
+            ("Spy", self._begin_spy_action, "spy", pygame.K_s, "Send a spy to an adjacent enemy"),
+        ]
+        width = 60
+        height = 14
+        for idx, (label, callback, key, hotkey, tip) in enumerate(specs):
+            rect = pygame.Rect(0, 0, width, height)
+            button = Button(rect=rect, text=label, on_click=callback, tooltip=tip, hotkey=hotkey)
+            self.utility_buttons.append(button)
+            self.utility_lookup[key] = button
+        self._update_utility_states()
+        self._layout_utility_buttons()
+
+    def _update_utility_states(self) -> None:
+        patrol_button = self.utility_lookup.get("patrol")
+        spy_button = self.utility_lookup.get("spy")
+        if patrol_button:
+            enabled = bool(self.selected_army and self.selected_army.has_naval())
+            patrol_button.enabled = enabled
+            patrol_button.selected = bool(self.selected_army and self.selected_army.is_patrolling())
+            if enabled and self.selected_army:
+                status = "Stand down patrol" if self.selected_army.is_patrolling() else "Begin naval patrol"
+                patrol_button.tooltip = f"{status} to guard trade routes"
+            else:
+                patrol_button.tooltip = "Select a fleet with a sloop or frigate"
+        if spy_button:
+            enabled = bool(self.selected_army and "spy" in self.selected_army.units)
+            spy_button.enabled = enabled
+            spy_button.selected = self.spy_mode
+            if enabled:
+                spy_button.tooltip = "Select an adjacent enemy region to infiltrate"
+            else:
+                spy_button.tooltip = "Recruit a spy unit to perform espionage"
+        ledger_button = self.utility_lookup.get("ledger")
+        if ledger_button:
+            ledger_button.enabled = True
+
+    def _layout_utility_buttons(self) -> None:
+        hud = pygame.Rect(4, 4, 312, 40)
+        info_rect = pygame.Rect(4, 48, 180, 110)
+        ledger_button = self.utility_lookup.get("ledger")
+        if ledger_button:
+            ledger_button.rect.topleft = (
+                hud.right - ledger_button.rect.width - 6,
+                hud.bottom - ledger_button.rect.height - 4,
+            )
+        patrol_button = self.utility_lookup.get("patrol")
+        spy_button = self.utility_lookup.get("spy")
+        base_y = info_rect.y + info_rect.height - 24
+        if patrol_button:
+            patrol_button.rect.topleft = (info_rect.x + 4, base_y)
+        if spy_button:
+            offset_x = info_rect.x + 8 + (patrol_button.rect.width if patrol_button else 0)
+            spy_button.rect.topleft = (offset_x, base_y)
 
     def handle_event(self, event: pygame.event.Event) -> None:
         if self._active_event:
             for button, _ in self._event_buttons:
                 button.handle_event(event)
             return
+        self._layout_utility_buttons()
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             pos = event.pos
+            target = self._region_at_point(pos)
+            if self.spy_mode and self.selected_army:
+                if not target:
+                    self.state.add_event("Click an adjacent region for espionage")
+                    return
+                if target == self.selected_army.location:
+                    self.state.add_event("Select an enemy region instead")
+                    return
+                self._attempt_spy(target)
+                return
             self._pick_region(pos)
             if self.selected_army and self.moving:
                 self._attempt_move_to_point(pos)
@@ -128,6 +205,12 @@ class CampaignScene(SceneBase):
                 for category in TECH_TREE:
                     self.state.factions[PLAYER_FACTION].tech_progress[category] = len(TECH_TREE[category])
                 self.state.add_event("Cheat: research complete")
+            elif event.key == pygame.K_l:
+                self._open_ledger()
+            elif event.key == pygame.K_p:
+                self._toggle_patrol()
+            elif event.key == pygame.K_s:
+                self._begin_spy_action()
             elif event.key in (pygame.K_z, pygame.K_u) and self.last_move:
                 army_index, prev = self.last_move
                 if 0 <= army_index < len(self.state.armies):
@@ -137,16 +220,22 @@ class CampaignScene(SceneBase):
                     self.state.add_event("Undo movement")
         for button in self.buttons:
             button.handle_event(event)
+        for button in self.utility_buttons:
+            button.handle_event(event)
 
-    def _pick_region(self, pos: tuple[int, int]) -> None:
-        closest = None
-        best_dist = 999
+    def _region_at_point(self, pos: tuple[int, int]) -> Optional[str]:
+        closest: Optional[str] = None
+        best_dist = 999.0
         for key, region in REGIONS.items():
             rx, ry = region.location
             dist = math.hypot(rx - pos[0], ry - pos[1])
             if dist < 10 and dist < best_dist:
                 best_dist = dist
                 closest = key
+        return closest
+
+    def _pick_region(self, pos: tuple[int, int]) -> None:
+        closest = self._region_at_point(pos)
         if closest:
             if closest in self.state.fog_of_war.get(PLAYER_FACTION, []):
                 self.selected_region = closest
@@ -161,6 +250,8 @@ class CampaignScene(SceneBase):
                 self.selected_army = army
                 break
         self._set_moving(False)
+        self._set_spy_mode(False, announce=False)
+        self._update_utility_states()
 
     def _update_recruit_tooltip(self) -> None:
         if not self.buttons:
@@ -260,8 +351,9 @@ class CampaignScene(SceneBase):
             if defender.units:
                 result = resolve_auto(self.state, army, defender, location=region.key)
                 if result.get("winner") == 1:
-                    region.owner = army.faction
-                    region.garrison = army.units[:1]
+                    self.state.capture_region(region.key, army.faction, announce_for=PLAYER_FACTION)
+                    updated = self.state.regions[region.key]
+                    updated.garrison = army.units[:1]
                 else:
                     region.garrison = defender.units
                     if not army.units:
@@ -270,7 +362,8 @@ class CampaignScene(SceneBase):
                         except ValueError:
                             pass
             else:
-                region.owner = army.faction
+                self.state.capture_region(region.key, army.faction, announce_for=PLAYER_FACTION)
+                region = self.state.regions[region.key]
                 self.state.add_event(f"{army.faction} occupied {REGIONS[region.key].name}")
 
     def _recruit(self) -> None:
@@ -329,6 +422,53 @@ class CampaignScene(SceneBase):
         else:
             self.state.add_event("Unable to start construction")
 
+    def _open_ledger(self) -> None:
+        self._set_spy_mode(False, announce=False)
+        self.app.switch_scene("ledger", return_to="campaign")
+
+    def _toggle_patrol(self) -> None:
+        if not self.selected_army:
+            self.state.add_event("Select a fleet to patrol")
+            return
+        if not self.selected_army.has_naval():
+            self.state.add_event("Patrols require naval vessels")
+            return
+        if self.selected_army.is_patrolling():
+            self.state.set_patrol(self.selected_army, False)
+        else:
+            self.state.set_patrol(self.selected_army, True)
+            self.selected_army.movement = 0
+        self._set_spy_mode(False, announce=False)
+        self._update_utility_states()
+
+    def _begin_spy_action(self) -> None:
+        if self.spy_mode:
+            self._set_spy_mode(False)
+            return
+        if not self.selected_army or "spy" not in self.selected_army.units:
+            self.state.add_event("No spy attached to the selected force")
+            return
+        self._set_spy_mode(True)
+
+    def _set_spy_mode(self, enabled: bool, *, announce: bool = True) -> None:
+        if self.spy_mode == enabled:
+            return
+        self.spy_mode = enabled
+        if announce:
+            if enabled:
+                self.state.add_event("Select an adjacent enemy region to infiltrate")
+            else:
+                self.state.add_event("Spy orders cancelled")
+        self._update_utility_states()
+
+    def _attempt_spy(self, target: str) -> None:
+        if not self.selected_army:
+            return
+        self.state.perform_espionage(self.selected_army, target)
+        self._set_spy_mode(False, announce=False)
+        self._update_recruit_tooltip()
+        self._update_build_tooltip()
+
     def _research(self) -> None:
         categories = list(TECH_TREE.keys())
         fac = self.state.factions[PLAYER_FACTION]
@@ -353,7 +493,10 @@ class CampaignScene(SceneBase):
         self.moving = bool(enabled and self.selected_army)
         if not self.moving:
             self._highlight_time = 0.0
+        else:
+            self._set_spy_mode(False, announce=False)
         self._sync_move_button_indicator()
+        self._update_utility_states()
 
     def _sync_move_button_indicator(self) -> None:
         for button in self.buttons:
@@ -380,7 +523,7 @@ class CampaignScene(SceneBase):
         self.state.apply_supply_attrition()
         self.state.process_construction()
         self.state.process_recruitment()
-        self.state.advance_turn()
+        self.state.advance_turn(player_faction=PLAYER_FACTION)
         movement.reset_movement(self.state)
         self.state.prepare_turn_events(PLAYER_FACTION)
         save_autosave(self.state)
@@ -431,6 +574,7 @@ class CampaignScene(SceneBase):
     def on_exit(self) -> None:
         self.context.audio.stop_loop("campaign_ambient")
         self._set_moving(False)
+        self._set_spy_mode(False, announce=False)
         self._active_event = None
         self._event_buttons.clear()
 
@@ -441,6 +585,15 @@ class CampaignScene(SceneBase):
         gfx.draw_panel(surface, hud, palette)
         header = f"{PLAYER_FACTION} | Treasury {self.state.factions[PLAYER_FACTION].treasury} | Turn {self.state.turn} {SEASONS[self.state.season_index]} {self.state.year}"
         gfx.draw_text(surface, header, (hud.x + 4, hud.y + 4), color_index=25, palette_name=palette)
+        weather_line = self.state.weather_summary()
+        if weather_line:
+            gfx.draw_text(
+                surface,
+                f"Weather: {weather_line[:38]}",
+                (hud.x + 4, hud.y + 14),
+                color_index=20,
+                palette_name=palette,
+            )
         if self.selected_region:
             info_rect = pygame.Rect(4, 48, 180, 110)
             gfx.draw_panel(surface, info_rect, palette)
@@ -470,19 +623,19 @@ class CampaignScene(SceneBase):
             gfx.draw_text(
                 surface,
                 f"Economy: {region.economy}",
-                (info_rect.x + 4, info_rect.y + 34),
+                (info_rect.x + 4, info_rect.y + 32),
                 palette_name=palette,
             )
             gfx.draw_text(
                 surface,
                 f"Stability: {region.stability:.2f}",
-                (info_rect.x + 4, info_rect.y + 44),
+                (info_rect.x + 4, info_rect.y + 40),
                 palette_name=palette,
             )
             gfx.draw_text(
                 surface,
                 f"Garrison: {len(region.garrison)}",
-                (info_rect.x + 4, info_rect.y + 54),
+                (info_rect.x + 4, info_rect.y + 48),
                 palette_name=palette,
             )
             supply_ok = self.state.region_has_supply(region.owner, region.key)
@@ -491,7 +644,7 @@ class CampaignScene(SceneBase):
             gfx.draw_text(
                 surface,
                 f"Supply: {supply_text}",
-                (info_rect.x + 4, info_rect.y + 64),
+                (info_rect.x + 4, info_rect.y + 56),
                 color_index=supply_color,
                 palette_name=palette,
             )
@@ -499,14 +652,27 @@ class CampaignScene(SceneBase):
             gfx.draw_text(
                 surface,
                 f"Income: {income_preview}",
-                (info_rect.x + 4, info_rect.y + 74),
+                (info_rect.x + 4, info_rect.y + 64),
                 palette_name=palette,
             )
             queue_preview = ", ".join(UNITS[u].name[:8] for u in region.recruit_queue[:3]) or "None"
             gfx.draw_text(
                 surface,
                 f"Queue: {queue_preview}",
-                (info_rect.x + 4, info_rect.y + 84),
+                (info_rect.x + 4, info_rect.y + 72),
+                palette_name=palette,
+            )
+            governor_desc = self.state.governor_trait_description(region.governor_trait)
+            gfx.draw_text(
+                surface,
+                f"Governor: {governor_desc[:20]}",
+                (info_rect.x + 4, info_rect.y + 80),
+                palette_name=palette,
+            )
+            gfx.draw_text(
+                surface,
+                f"Focus {region.governor_turns}t",
+                (info_rect.x + 4, info_rect.y + 88),
                 palette_name=palette,
             )
             building_bits = []
@@ -518,7 +684,7 @@ class CampaignScene(SceneBase):
             gfx.draw_text(
                 surface,
                 f"Builds: {building_text}",
-                (info_rect.x + 4, info_rect.y + 94),
+                (info_rect.x + 4, info_rect.y + 96),
                 palette_name=palette,
             )
             if region.project:
@@ -533,10 +699,14 @@ class CampaignScene(SceneBase):
         self._draw_objectives(surface, palette)
         self._draw_advisor(surface, palette)
         self._draw_diplomacy_panel(surface, palette)
+        self._layout_utility_buttons()
         for button in self.buttons:
             button.draw(surface, palette)
             button.draw_tooltip(surface)
-        log_rect = pygame.Rect(4, 172, 312, 24)
+        for button in self.utility_buttons:
+            button.draw(surface, palette)
+            button.draw_tooltip(surface)
+        log_rect = pygame.Rect(4, 176, 312, 20)
         self.message_log.draw(surface, log_rect, palette)
         hint_area = pygame.Rect(log_rect.x + 2, log_rect.bottom - 8, log_rect.width - 4, 8)
         surface.fill(gfx.get_palette(palette)[2], hint_area)
@@ -594,6 +764,10 @@ class CampaignScene(SceneBase):
                 pygame.draw.circle(surface, highlight_color, (x, y), radius, 1)
             if discovered:
                 gfx.draw_text(surface, region.name[:10], (x - 12, y + 8), color_index=15, palette_name=palette)
+        for army in self.state.armies:
+            if army.faction == PLAYER_FACTION and army.is_patrolling():
+                px, py = REGIONS[army.location].location
+                pygame.draw.circle(surface, gfx.get_palette(palette)[27], (px, py), 9, 1)
         if self.moving and self.selected_army and highlight_targets:
             origin_pos = REGIONS[self.selected_army.location].location
             pulse = (math.sin(self._highlight_time * 6.0) + 1.0) * 0.5

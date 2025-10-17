@@ -24,6 +24,39 @@ SAVES_DIR = Path("saves")
 
 SEASONS = ["Spring", "Summer", "Autumn", "Winter"]
 
+WEATHER_PROFILES = {
+    "Spring": {"movement": 1.0, "attack": 1.0, "defense": 1.0},
+    "Summer": {"movement": 1.15, "attack": 1.05, "defense": 0.95},
+    "Autumn": {"movement": 0.95, "attack": 1.0, "defense": 1.05},
+    "Winter": {"movement": 0.75, "attack": 0.9, "defense": 1.15},
+}
+
+WEATHER_DESCRIPTIONS = {
+    "Spring": "Roads thaw; conditions are balanced.",
+    "Summer": "Dry roads quicken marches but defenses suffer heat fatigue.",
+    "Autumn": "Rains slow supply columns while defenders dig in.",
+    "Winter": "Bitter cold saps assaults yet bolsters defensive stands.",
+}
+
+GOVERNOR_TRAITS = {
+    "merchant": {
+        "description": "Merchant guilds swell tax coffers.",
+        "income": 0.18,
+    },
+    "steward": {
+        "description": "A steady steward soothes unrest.",
+        "stability": 0.04,
+    },
+    "drillmaster": {
+        "description": "Drillmasters hasten recruitment queues.",
+        "extra_recruit": 1,
+    },
+    "spymaster": {
+        "description": "Spymasters sharpen covert operations.",
+        "spy_bonus": 0.2,
+    },
+}
+
 
 @dataclass
 class Army:
@@ -32,6 +65,8 @@ class Army:
     units: List[str]
     movement: int = 1
     experience: int = 0
+    patrol_target: Optional[str] = None
+    patrol_turns: int = 0
 
     def power(self) -> int:
         base = sum(UNITS[u].attack + UNITS[u].defense for u in self.units)
@@ -44,6 +79,9 @@ class Army:
         if not self.units:
             return 1
         return max(UNITS[u].speed for u in self.units)
+
+    def is_patrolling(self) -> bool:
+        return self.patrol_target is not None
 
 
 @dataclass
@@ -65,6 +103,8 @@ class RegionState:
     buildings: Dict[str, int] = field(default_factory=dict)
     project: Optional[ConstructionProject] = None
     unsupplied_turns: int = 0
+    governor_trait: str = ""
+    governor_turns: int = 0
 
     def income(self) -> int:
         resource = REGIONS[self.key].resource
@@ -87,6 +127,7 @@ class FactionState:
     research_points: int = 0
     diplomacy: Diplomacy = field(default_factory=Diplomacy)
     bonus_modifiers: Dict[str, float] = field(default_factory=dict)
+    capital_upgrade: int = 0
 
     def __post_init__(self) -> None:
         faction = FACTIONS.get(self.name)
@@ -161,6 +202,7 @@ class GameState:
     objectives: Dict[str, List[Objective]] = field(default_factory=dict)
     pending_events: List[StoryEvent] = field(default_factory=list)
     research_notifications: List[Tuple[str, str]] = field(default_factory=list)
+    battle_journal: List[Dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def new_game(cls, seed: Optional[int] = None) -> "GameState":
@@ -184,11 +226,24 @@ class GameState:
             economy = reg.base_income
             stability = rng.uniform(0.6, 1.0)
             garrison = ["militia"]
-            regions[key] = RegionState(key=key, owner=owner, population=population, economy=economy, stability=stability, garrison=garrison, discovered=(owner == "Britain"))
+            trait = rng.choice(list(GOVERNOR_TRAITS.keys()))
+            duration = rng.randint(3, 6)
+            regions[key] = RegionState(
+                key=key,
+                owner=owner,
+                population=population,
+                economy=economy,
+                stability=stability,
+                garrison=garrison,
+                discovered=(owner == "Britain"),
+                governor_trait=trait,
+                governor_turns=duration,
+            )
             faction_def = FACTIONS.get(owner)
             if faction_def and faction_def.capital == key:
                 regions[key].buildings["market"] = 1
                 regions[key].economy += 2
+                regions[key].buildings.setdefault("capital", 0)
             i += 1
         armies = [Army(faction="Britain", location="london", units=["line", "line", "cavalry"])]
         fog = {fac: ["london"] for fac in factions}
@@ -216,6 +271,7 @@ class GameState:
             fog_of_war=fog,
             last_events=["Campaign begins"],
             objectives=objectives,
+            battle_journal=[],
         )
 
     def to_json(self) -> str:
@@ -235,6 +291,7 @@ class GameState:
                     trade=fac.get("diplomacy", {}).get("trade", {}),
                 ),
                 bonus_modifiers=dict(fac.get("bonus_modifiers", {})),
+                capital_upgrade=fac.get("capital_upgrade", 0),
             )
             for name, fac in data["factions"].items()
         }
@@ -265,6 +322,8 @@ class GameState:
                 buildings=dict(reg.get("buildings", {})),
                 project=project,
                 unsupplied_turns=reg.get("unsupplied_turns", 0),
+                governor_trait=reg.get("governor_trait", "merchant"),
+                governor_turns=reg.get("governor_turns", 3),
             )
         armies = [
             Army(
@@ -273,9 +332,22 @@ class GameState:
                 units=list(army.get("units", [])),
                 movement=army.get("movement", 1),
                 experience=army.get("experience", 0),
+                patrol_target=army.get("patrol_target"),
+                patrol_turns=army.get("patrol_turns", 0),
             )
             for army in data.get("armies", [])
         ]
+        for faction_name, faction_state in factions.items():
+            faction_def = FACTIONS.get(faction_name)
+            if not faction_def:
+                continue
+            capital_key = faction_def.capital
+            region = regions.get(capital_key)
+            if not region:
+                continue
+            level = region.buildings.get("capital", faction_state.capital_upgrade)
+            region.buildings.setdefault("capital", level)
+            faction_state.capital_upgrade = max(faction_state.capital_upgrade, level)
         objectives = {
             fac: [
                 Objective(
@@ -320,6 +392,7 @@ class GameState:
             objectives=objectives,
             pending_events=pending_events,
             research_notifications=research_notifications,
+            battle_journal=list(data.get("battle_journal", [])),
         )
 
     @classmethod
@@ -334,14 +407,39 @@ class GameState:
         path = SAVES_DIR / f"{slot}.json"
         path.write_text(self.to_json())
 
-    def advance_turn(self) -> None:
+    def advance_turn(self, player_faction: Optional[str] = None) -> None:
+        previous_season = self.current_season()
         self.turn += 1
         self.season_index = (self.season_index + 1) % len(SEASONS)
         if self.season_index == 0:
             self.year += 1
+        if previous_season != self.current_season():
+            summary = self.weather_summary()
+            if summary:
+                self.add_event(f"Season shifts to {self.current_season()}: {summary}")
+        self.rotate_governors(announce_for=player_faction)
+        self.tick_patrols()
 
     def rng(self) -> random.Random:
         return random.Random(self.rng_seed + self.turn)
+
+    def current_season(self) -> str:
+        return SEASONS[self.season_index % len(SEASONS)]
+
+    def weather_profile(self) -> Dict[str, float]:
+        return WEATHER_PROFILES.get(self.current_season(), WEATHER_PROFILES["Spring"])
+
+    def weather_movement_modifier(self) -> float:
+        return self.weather_profile().get("movement", 1.0)
+
+    def weather_attack_modifier(self) -> float:
+        return self.weather_profile().get("attack", 1.0)
+
+    def weather_defense_modifier(self) -> float:
+        return self.weather_profile().get("defense", 1.0)
+
+    def weather_summary(self) -> str:
+        return WEATHER_DESCRIPTIONS.get(self.current_season(), "")
 
     def reveal_region(self, faction: str, region: str) -> None:
         self.fog_of_war.setdefault(faction, [])
@@ -358,6 +456,170 @@ class GameState:
         self.last_events.append(text)
         if len(self.last_events) > 12:
             self.last_events = self.last_events[-12:]
+
+    def assign_governor_trait(
+        self,
+        region: RegionState,
+        trait: Optional[str] = None,
+        *,
+        announce_for: Optional[str] = None,
+        duration: Optional[int] = None,
+        rng: Optional[random.Random] = None,
+    ) -> None:
+        pool = list(GOVERNOR_TRAITS.keys()) or ["merchant"]
+        rng = rng or self.rng()
+        if not trait or trait not in GOVERNOR_TRAITS:
+            trait = rng.choice(pool)
+        if duration is None:
+            duration = rng.randint(4, 6)
+        region.governor_trait = trait
+        region.governor_turns = duration
+        if announce_for and region.owner == announce_for:
+            desc = GOVERNOR_TRAITS.get(trait, {}).get("description", trait.title())
+            self.add_event(f"Governor in {REGIONS[region.key].name}: {desc}")
+
+    def rotate_governors(self, announce_for: Optional[str] = None) -> None:
+        rng = self.rng()
+        for region in self.regions.values():
+            if region.owner not in self.factions:
+                continue
+            region.governor_turns = max(0, region.governor_turns - 1)
+            if region.governor_turns <= 0:
+                self.assign_governor_trait(region, announce_for=announce_for, rng=rng)
+
+    def governor_trait_bonus(self, region: Optional[RegionState], key: str, default: float = 0.0) -> float:
+        if region is None:
+            return default
+        data = GOVERNOR_TRAITS.get(region.governor_trait)
+        if not data:
+            return default
+        return float(data.get(key, default))
+
+    def governor_trait_description(self, trait: str) -> str:
+        return GOVERNOR_TRAITS.get(trait, {}).get("description", trait.title())
+
+    def active_patrols(self, faction: str) -> List[Army]:
+        return [army for army in self.armies if army.faction == faction and army.is_patrolling()]
+
+    def count_patrols(self, faction: str) -> int:
+        return len(self.active_patrols(faction))
+
+    def naval_patrol_income_bonus(self, faction: str) -> int:
+        fac_state = self.factions.get(faction)
+        if not fac_state:
+            return 0
+        patrols = self.active_patrols(faction)
+        if not patrols:
+            return 0
+        trade_routes = sum(1 for active in fac_state.diplomacy.trade.values() if active)
+        base = 6 * len(patrols)
+        return base + trade_routes * 2
+
+    def set_patrol(self, army: Army, enabled: bool) -> None:
+        if enabled:
+            if army.is_patrolling():
+                return
+            army.patrol_target = army.location
+            army.patrol_turns = 0
+            self.add_event(f"{army.faction} patrol established near {REGIONS[army.location].name}")
+        else:
+            if not army.is_patrolling():
+                return
+            if army.is_patrolling():
+                self.add_event(f"{army.faction} patrol stood down near {REGIONS[army.location].name}")
+            army.patrol_target = None
+            army.patrol_turns = 0
+
+    def tick_patrols(self) -> None:
+        for army in self.armies:
+            if army.is_patrolling():
+                army.patrol_turns += 1
+
+    def capture_region(self, region_key: str, new_owner: str, announce_for: Optional[str] = None) -> None:
+        region = self.regions[region_key]
+        if region.owner == new_owner:
+            return
+        previous_owner = region.owner
+        region.owner = new_owner
+        region.garrison = list(region.garrison)
+        region.unsupplied_turns = 0
+        region.governor_turns = 0
+        self.assign_governor_trait(region, announce_for=announce_for)
+        self.reveal_region(new_owner, region_key)
+        faction_def = FACTIONS.get(new_owner)
+        if faction_def and faction_def.capital == region_key:
+            level = region.buildings.get("capital", 0)
+            self.factions[new_owner].capital_upgrade = level
+        prev_def = FACTIONS.get(previous_owner)
+        if prev_def and prev_def.capital == region_key and previous_owner in self.factions:
+            self.factions[previous_owner].capital_upgrade = 0
+        if previous_owner != new_owner:
+            self.add_event(f"{new_owner} seized {REGIONS[region_key].name}")
+
+    def perform_espionage(self, army: Army, target_region: str) -> str:
+        if "spy" not in army.units:
+            return "No spy unit available"
+        if target_region not in REGIONS:
+            return "Unknown target"
+        origin = REGIONS[army.location]
+        if target_region not in origin.neighbors:
+            return "Target must be adjacent"
+        target_state = self.regions[target_region]
+        if target_state.owner == army.faction:
+            return "Cannot spy on friendly region"
+        rng = self.rng()
+        base_chance = 0.6
+        origin_state = self.regions.get(army.location)
+        bonus = self.governor_trait_bonus(origin_state, "spy_bonus", 0.0) if origin_state else 0.0
+        chance = min(0.95, base_chance + bonus)
+        army.movement = 0
+        if rng.random() <= chance:
+            self.reveal_region(army.faction, target_region)
+            target_state.stability = max(0.2, target_state.stability - 0.06)
+            if target_state.garrison:
+                lost = target_state.garrison.pop(0)
+                self.add_event(
+                    f"Spy disrupted {REGIONS[target_region].name}, eliminating {UNITS[lost].name}"
+                )
+            else:
+                self.add_event(f"Spy maps {REGIONS[target_region].name}; defenses seem light")
+            return "Espionage succeeded"
+        if rng.random() < 0.5:
+            try:
+                army.units.remove("spy")
+                self.add_event("Spy was captured during the attempt")
+            except ValueError:
+                pass
+        else:
+            self.add_event("Spy forced to retreat without intel")
+        return "Espionage failed"
+
+    def record_battle(
+        self,
+        *,
+        location: str,
+        attacker: str,
+        defender: str,
+        winner: str,
+        battle_type: str,
+        attacker_losses: int,
+        defender_losses: int,
+    ) -> None:
+        entry = {
+            "turn": str(self.turn),
+            "season": self.current_season(),
+            "year": str(self.year),
+            "location": REGIONS.get(location, RegionDef(location, location, (0, 0), [], "", 0)).name,
+            "attacker": attacker,
+            "defender": defender,
+            "winner": winner,
+            "type": battle_type,
+            "atk_losses": str(attacker_losses),
+            "def_losses": str(defender_losses),
+        }
+        self.battle_journal.append(entry)
+        if len(self.battle_journal) > 12:
+            self.battle_journal = self.battle_journal[-12:]
 
     def upkeep_cost(self, faction: str) -> int:
         total = 0
@@ -379,16 +641,31 @@ class GameState:
             income += trade_income_bonus(self, faction)
         except Exception:
             pass
+        patrol_bonus = self.naval_patrol_income_bonus(faction)
+        if patrol_bonus:
+            income += patrol_bonus
         upkeep = self.upkeep_cost(faction)
         fac_state.treasury += income - upkeep
-        self.add_event(f"{faction} income {income} - upkeep {upkeep} = {income - upkeep}")
-        return income - upkeep
+        if patrol_bonus:
+            self.add_event(f"{faction} patrols secured +{patrol_bonus} trade income")
+        net = income - upkeep
+        self.add_event(f"{faction} income {income} - upkeep {upkeep} = {net}")
+        return net
 
     def region_income_value(self, region: RegionState) -> int:
         base = region.income()
         base += region.buildings.get("market", 0) * 6
         if region.project and region.project.building == "market":
             base += 2
+        trait_bonus = self.governor_trait_bonus(region, "income", 0.0)
+        if trait_bonus:
+            base = int(base * (1.0 + trait_bonus))
+        capital_key = self.faction_capital(region.owner)
+        faction_state = self.factions.get(region.owner)
+        if capital_key and capital_key == region.key and faction_state:
+            upgrade = faction_state.capital_upgrade
+            if upgrade:
+                base = int(base * (1.05 + 0.05 * upgrade))
         if not self.region_has_supply(region.owner, region.key):
             base = int(base * 0.5)
         return base
@@ -443,6 +720,22 @@ class GameState:
         options: List[BuildingDef] = []
         for key in ORDERED_BUILDINGS:
             building = BUILDINGS[key]
+            if building.key == "capital":
+                faction_def = FACTIONS.get(region.owner)
+                if not faction_def or faction_def.capital != region.key:
+                    continue
+                faction_state = self.factions.get(region.owner)
+                current_level = 0
+                if faction_state:
+                    current_level = max(
+                        faction_state.capital_upgrade,
+                        region.buildings.get(building.key, 0),
+                    )
+                if faction_state and current_level >= building.max_level:
+                    continue
+                if current_level < building.max_level:
+                    options.append(building)
+                continue
             if region.buildings.get(key, 0) < building.max_level:
                 options.append(building)
         return options
@@ -450,8 +743,17 @@ class GameState:
     def start_construction(self, region: RegionState, building: BuildingDef) -> bool:
         if region.project:
             return False
-        if region.buildings.get(building.key, 0) >= building.max_level:
-            return False
+        current_level = region.buildings.get(building.key, 0)
+        if building.key == "capital":
+            faction_state = self.factions.get(region.owner)
+            if not faction_state:
+                return False
+            current_level = max(current_level, faction_state.capital_upgrade)
+            if current_level >= building.max_level:
+                return False
+        else:
+            if current_level >= building.max_level:
+                return False
         if not self.region_has_supply(region.owner, region.key):
             return False
         faction = self.factions.get(region.owner)
@@ -494,6 +796,12 @@ class GameState:
             region.stability = min(1.3, region.stability + 0.03)
         elif building.key == "culture":
             region.stability = min(1.4, region.stability + 0.08)
+        elif building.key == "capital":
+            faction = self.factions.get(region.owner)
+            if faction:
+                level = region.buildings.get("capital", 0)
+                faction.capital_upgrade = max(faction.capital_upgrade, level)
+                region.stability = min(1.4, region.stability + 0.05 * max(1, level))
 
     def region_defense_bonus(self, region_key: str) -> int:
         region = self.regions.get(region_key)
@@ -513,10 +821,22 @@ class GameState:
                 culture_level = region.buildings.get("culture", 0)
                 if culture_level and region.stability < 1.35:
                     region.stability = min(1.35, region.stability + 0.02 * culture_level)
+                trait_boost = self.governor_trait_bonus(region, "stability", 0.0)
+                if trait_boost:
+                    region.stability = min(1.4, region.stability + trait_boost)
                 continue
             region.unsupplied_turns += 1
             penalty = 0.05 + 0.02 * max(0, region.unsupplied_turns - 1)
             penalty = max(0.02, penalty - 0.01 * region.buildings.get("fort", 0))
+            cap_upgrade = 0
+            faction_state = self.factions.get(region.owner)
+            if faction_state:
+                cap_upgrade = faction_state.capital_upgrade
+            if cap_upgrade:
+                penalty = max(0.015, penalty - 0.01 * cap_upgrade)
+            trait_relief = self.governor_trait_bonus(region, "stability", 0.0)
+            if trait_relief:
+                penalty = max(0.01, penalty - trait_relief / 2)
             region.stability = max(0.2, region.stability - penalty)
             if region.unsupplied_turns % 2 == 0 and region.garrison:
                 lost = region.garrison.pop(0)
@@ -573,6 +893,15 @@ class GameState:
                 options.append("sloop")
             if naval_tier >= 2 and "frigate" not in options:
                 options.append("frigate")
+            if (
+                region.buildings.get("culture", 0)
+                or self.governor_trait_bonus(region, "spy_bonus", 0.0)
+                or (
+                    self.faction_capital(owner) == region.key
+                    and fac.capital_upgrade >= 1
+                )
+            ) and "spy" not in options:
+                options.append("spy")
         return options
 
     def recruit_cost(self, unit_key: str) -> int:
@@ -584,6 +913,8 @@ class GameState:
             base += 15
         if unit_key == "cavalry":
             base += 20
+        if unit_key == "spy":
+            base = max(20, base - 12)
         return base
 
     def army_has_naval_support(self, army: Army, destination: Optional[str] = None) -> bool:
@@ -668,11 +999,25 @@ class GameState:
                         f"Recruitment stalled in {REGIONS[region.key].name} (cut off)"
                     )
                 continue
-            unit_key = region.recruit_queue.pop(0)
-            region.garrison.append(unit_key)
-            unit_name = UNITS[unit_key].name
-            region_name = REGIONS[region.key].name
-            self.add_event(f"{region.owner} raised {unit_name} in {region_name}")
+            slots = 1
+            extra = int(self.governor_trait_bonus(region, "extra_recruit", 0))
+            if extra > 0:
+                slots += extra
+            faction_state = self.factions.get(region.owner)
+            if (
+                faction_state
+                and self.faction_capital(region.owner) == region.key
+                and faction_state.capital_upgrade >= 2
+            ):
+                slots += 1
+            for _ in range(slots):
+                if not region.recruit_queue:
+                    break
+                unit_key = region.recruit_queue.pop(0)
+                region.garrison.append(unit_key)
+                unit_name = UNITS[unit_key].name
+                region_name = REGIONS[region.key].name
+                self.add_event(f"{region.owner} raised {unit_name} in {region_name}")
 
     # Narrative events --------------------------------------------------
 

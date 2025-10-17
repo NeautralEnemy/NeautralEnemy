@@ -17,10 +17,12 @@ def resolve_auto(
     location: Optional[str] = None,
 ) -> BattleResult:
     location = location or defender.location
+    attacker_start = len(attacker.units)
+    defender_start = len(defender.units)
     atk_power = sum(state.unit_attack_value(attacker.faction, u) for u in attacker.units) + attacker.experience * 2
     def_power = sum(state.unit_defense_value(defender.faction, u) for u in defender.units) + defender.experience * 2
-    atk_score = atk_power
-    def_score = def_power
+    atk_score = atk_power * state.weather_attack_modifier()
+    def_score = def_power * state.weather_defense_modifier()
     if location:
         def_score += state.region_defense_bonus(location)
         if not state.region_has_supply(defender.faction, location):
@@ -34,6 +36,17 @@ def resolve_auto(
         defender.units = []
         state.add_event(f"{attacker.faction} wins with auto-resolve")
         attacker.experience = min(attacker.experience + 1, 5)
+        attacker_losses = max(0, attacker_start - len(attacker.units))
+        defender_losses = defender_start
+        state.record_battle(
+            location=location,
+            attacker=attacker.faction,
+            defender=defender.faction,
+            winner=attacker.faction,
+            battle_type="auto",
+            attacker_losses=attacker_losses,
+            defender_losses=defender_losses,
+        )
         return BattleResult(winner=1)
     else:
         losses = min(len(defender.units), max(1, int(len(defender.units) * 0.2)))
@@ -41,4 +54,15 @@ def resolve_auto(
         attacker.units = []
         state.add_event(f"{defender.faction} defends successfully")
         defender.experience = min(defender.experience + 1, 5)
+        defender_losses = max(0, defender_start - len(defender.units))
+        attacker_losses = attacker_start
+        state.record_battle(
+            location=location,
+            attacker=attacker.faction,
+            defender=defender.faction,
+            winner=defender.faction,
+            battle_type="auto",
+            attacker_losses=attacker_losses,
+            defender_losses=defender_losses,
+        )
         return BattleResult(winner=0)

@@ -24,4 +24,5 @@ UNITS: Dict[str, UnitType] = {
     "artillery": UnitType("artillery", "Artillery", attack=8, defense=3, range=6, speed=1, morale=5, upkeep=14),
     "sloop": UnitType("sloop", "Sloop", attack=5, defense=4, range=5, speed=3, morale=5, upkeep=8),
     "frigate": UnitType("frigate", "Frigate", attack=7, defense=5, range=6, speed=3, morale=6, upkeep=12),
+    "spy": UnitType("spy", "Spy", attack=2, defense=2, range=1, speed=4, morale=4, upkeep=4),
 }

@@ -86,8 +86,8 @@ class AIController:
                         self.state, army, defender, location=defender.location
                     )
                     if result.get("winner") == 1:
+                        self.state.capture_region(defender_key, self.faction)
                         region = self.state.regions[defender_key]
-                        region.owner = self.faction
                         region.garrison = army.units[:1]
                     else:
                         self.state.regions[defender_key].garrison = defender.units
@@ -97,8 +97,8 @@ class AIController:
                             except ValueError:
                                 pass
                 else:
+                    self.state.capture_region(defender_key, self.faction)
                     region = self.state.regions[defender_key]
-                    region.owner = self.faction
                     region.garrison = []
                     self.state.add_event(f"{self.faction} captured {REGIONS[defender_key].name}")
             else:

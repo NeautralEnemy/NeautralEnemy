@@ -16,6 +16,8 @@ def move_army(state: GameState, army: Army, destination: str) -> bool:
     region = state.get_region(army.location)
     if destination not in REGIONS[region.key].neighbors:
         return False
+    if army.is_patrolling():
+        state.set_patrol(army, False)
     cost = 1
     if is_sea_lane(region.key, destination):
         if not state.army_has_naval_support(army, destination):
@@ -35,11 +37,16 @@ def move_army(state: GameState, army: Army, destination: str) -> bool:
 
 def reset_movement(state: GameState) -> None:
     for army in state.armies:
+        if army.is_patrolling():
+            army.movement = 0
+            continue
         base_speed = army.max_speed()
         if army.has_naval():
             base_speed = max(base_speed, 3)
             base_speed = base_speed * state.factions[army.faction].naval_modifier()
-        movement_allowance = max(1, min(4, int(round(base_speed))))
+        weather = state.weather_movement_modifier()
+        movement_allowance = int(round(base_speed * weather))
+        movement_allowance = max(1, min(5, movement_allowance))
         if not state.region_has_supply(army.faction, army.location):
             movement_allowance = max(1, int(round(movement_allowance * 0.5)))
         army.movement = movement_allowance
