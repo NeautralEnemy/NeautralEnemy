@@ -1,0 +1,10 @@
+# Unimplemented or Unused Features
+
+The following items are defined in the Colonial Command codebase but either have no effect in gameplay or are not referenced anywhere else. These should be implemented or removed to avoid confusing players and maintainers.
+
+- **Technology bonuses are ignored.** `TechNode.bonus` values (income, trade, morale, attack, artillery, naval) are never applied when research completes, so finishing techs has no mechanical impact beyond log messages. The research handler in `GameState.progress_research` only advances tiers and queues notifications. 【F:src/data/tech.py†L1-L34】【F:src/core/state.py†L307-L333】
+- **Faction trait strings and several modifiers are unused.** Each `Faction` declares a `bonus` label and modifier entries such as `trade` or `naval`, but only the `income` and `morale` keys are read anywhere in the simulation. Britain’s trade boost and the Netherlands’ naval bonus currently do nothing. 【F:src/data/factions.py†L1-L24】【F:src/core/state.py†L55-L69】
+- **Region resource tags do not influence gameplay.** Every `RegionDef` provides a `resource` string, yet no system ever reads that attribute when calculating income, recruitment, or events. 【F:src/data/regions.py†L1-L43】
+- **Unit speed stats are never consumed.** The `UnitType.speed` attribute is defined for all land and naval units, but no movement, tactical, or AI logic references it. A global army movement allowance of one step per turn ignores these per-unit values. 【F:src/data/units.py†L1-L27】【8a181a†L1-L11】
+- **Naval unit entries are unreachable.** `sloop` and `frigate` appear in the unit table but are not referenced by recruitment, combat, or AI scripts, so players can never build or encounter them. 【F:src/data/units.py†L20-L27】【bc1d05†L1-L3】【846202†L1-L3】
+- **Diplomacy relation levels constant is orphaned.** `RELATION_LEVELS = ["war", "neutral", "allied"]` is defined but never used to gate diplomacy actions or UI, hinting at an unfinished relationship system. 【F:src/systems/diplomacy.py†L1-L27】【775908†L1-L3】
