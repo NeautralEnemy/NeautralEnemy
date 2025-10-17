@@ -14,6 +14,7 @@ from data.factions import FACTIONS, MAJOR_FACTIONS
 from data.regions import REGIONS
 from data.units import UNITS
 from data.tech import TECH_TREE
+from data.buildings import BUILDINGS, ORDERED_BUILDINGS
 from systems import economy, research, movement, ai
 from systems.battle_auto import resolve_auto
 from .base import SceneBase
@@ -43,6 +44,7 @@ class CampaignScene(SceneBase):
         self._advisor_timer: float = 0.0
         self._trade_timer: float = 0.0
         self.recruit_cycle: dict[str, int] = {}
+        self.build_cycle: dict[str, int] = {}
 
     @property
     def state(self) -> GameState:
@@ -59,6 +61,7 @@ class CampaignScene(SceneBase):
             else:
                 self.selected_region = next(iter(self.state.regions))
         self._update_recruit_tooltip()
+        self._update_build_tooltip()
         if not self._entered:
             self._last_event_count = 0
             self.message_log.clear()
@@ -149,6 +152,7 @@ class CampaignScene(SceneBase):
                 self.selected_region = closest
                 self._select_army_at_region(closest)
                 self._update_recruit_tooltip()
+                self._update_build_tooltip()
 
     def _select_army_at_region(self, region_key: str) -> None:
         self.selected_army = None
@@ -182,7 +186,52 @@ class CampaignScene(SceneBase):
             lines.append(f"{unit.name}: Cost {cost} | Upkeep {unit.upkeep}")
         if len(options) > 4:
             lines.append("...")
+        if not self.state.region_has_supply(PLAYER_FACTION, region.key):
+            lines.append("Supply cut! Queue cannot complete until reconnected.")
         button.tooltip = "\n".join(lines)
+
+    def _update_build_tooltip(self) -> None:
+        if not self.buttons:
+            return
+        build_button: Optional[Button] = None
+        for btn in self.buttons:
+            if btn.text.lower().startswith("build"):
+                build_button = btn
+                break
+        if not build_button:
+            return
+        if not self.selected_region:
+            build_button.tooltip = "Select a region to develop"
+            return
+        region = self.state.regions[self.selected_region]
+        if region.owner != PLAYER_FACTION:
+            build_button.tooltip = "Occupy the region to improve it"
+            return
+        if region.project:
+            project = region.project
+            building = BUILDINGS.get(project.building)
+            if building:
+                build_button.tooltip = (
+                    f"{building.name} under construction\nTurns remaining: {project.turns_left}"
+                )
+            else:
+                build_button.tooltip = "Construction underway"
+            return
+        options = self.state.available_buildings(region)
+        if not options:
+            build_button.tooltip = "Region fully developed"
+            return
+        index = self.build_cycle.get(region.key, 0) % len(options)
+        lines = ["Build (cycles each click)"]
+        for offset in range(min(3, len(options))):
+            opt = options[(index + offset) % len(options)]
+            level = region.buildings.get(opt.key, 0) + 1
+            lines.append(
+                f"{opt.name} Lv{level}: Cost {opt.cost} | {opt.effect}"
+            )
+        if not self.state.region_has_supply(PLAYER_FACTION, region.key):
+            lines.append("Supply cut! Construction paused until reconnected.")
+        build_button.tooltip = "\n".join(lines)
 
     def _attempt_move_to_point(self, pos: tuple[int, int]) -> None:
         if not self.selected_army:
@@ -209,7 +258,7 @@ class CampaignScene(SceneBase):
         if region.owner != army.faction:
             defender = Army(faction=region.owner, location=region.key, units=list(region.garrison))
             if defender.units:
-                result = resolve_auto(self.state, army, defender)
+                result = resolve_auto(self.state, army, defender, location=region.key)
                 if result.get("winner") == 1:
                     region.owner = army.faction
                     region.garrison = army.units[:1]
@@ -258,15 +307,27 @@ class CampaignScene(SceneBase):
         if region.owner != PLAYER_FACTION:
             self.state.add_event("Must control region to build")
             return
+        if region.project:
+            self.state.add_event("Construction already underway")
+            return
+        options = self.state.available_buildings(region)
+        if not options:
+            self.state.add_event("Region cannot support further upgrades")
+            return
+        index = self.build_cycle.get(region.key, 0) % len(options)
+        building = options[index]
         fac = self.state.factions[PLAYER_FACTION]
-        cost = 80
-        if fac.treasury < cost:
+        if fac.treasury < building.cost:
             self.state.add_event("Insufficient treasury")
             return
-        region.economy += 4
-        region.stability = min(1.2, region.stability + 0.05)
-        fac.treasury -= cost
-        self.state.add_event(f"Upgraded infrastructure in {REGIONS[region.key].name}")
+        if not self.state.region_has_supply(PLAYER_FACTION, region.key):
+            self.state.add_event("Restore supply before beginning construction")
+            return
+        if self.state.start_construction(region, building):
+            self.build_cycle[region.key] = (index + 1) % len(options)
+            self._update_build_tooltip()
+        else:
+            self.state.add_event("Unable to start construction")
 
     def _research(self) -> None:
         categories = list(TECH_TREE.keys())
@@ -316,9 +377,11 @@ class CampaignScene(SceneBase):
             self.state.add_event("AI moves skipped")
         else:
             ai.run_ai_turns(self.state, PLAYER_FACTION)
+        self.state.apply_supply_attrition()
+        self.state.process_construction()
+        self.state.process_recruitment()
         self.state.advance_turn()
         movement.reset_movement(self.state)
-        self.state.process_recruitment()
         self.state.prepare_turn_events(PLAYER_FACTION)
         save_autosave(self.state)
         treasury_after = self.state.factions[PLAYER_FACTION].treasury
@@ -327,6 +390,7 @@ class CampaignScene(SceneBase):
             f"Treasury summary: +{income_total} income -{upkeep_total} upkeep = {delta:+d}"
         )
         self.state.add_event("Turn ended")
+        self._update_build_tooltip()
         self._refresh_objectives()
 
     def update(self, dt: float) -> None:
@@ -378,7 +442,7 @@ class CampaignScene(SceneBase):
         header = f"{PLAYER_FACTION} | Treasury {self.state.factions[PLAYER_FACTION].treasury} | Turn {self.state.turn} {SEASONS[self.state.season_index]} {self.state.year}"
         gfx.draw_text(surface, header, (hud.x + 4, hud.y + 4), color_index=25, palette_name=palette)
         if self.selected_region:
-            info_rect = pygame.Rect(4, 48, 180, 90)
+            info_rect = pygame.Rect(4, 48, 180, 110)
             gfx.draw_panel(surface, info_rect, palette)
             region = self.state.regions[self.selected_region]
             gfx.draw_text(
@@ -421,13 +485,51 @@ class CampaignScene(SceneBase):
                 (info_rect.x + 4, info_rect.y + 54),
                 palette_name=palette,
             )
+            supply_ok = self.state.region_has_supply(region.owner, region.key)
+            supply_text = "Supplied" if supply_ok else "Cut Off"
+            supply_color = 24 if supply_ok else 28
+            gfx.draw_text(
+                surface,
+                f"Supply: {supply_text}",
+                (info_rect.x + 4, info_rect.y + 64),
+                color_index=supply_color,
+                palette_name=palette,
+            )
+            income_preview = self.state.region_income_value(region)
+            gfx.draw_text(
+                surface,
+                f"Income: {income_preview}",
+                (info_rect.x + 4, info_rect.y + 74),
+                palette_name=palette,
+            )
             queue_preview = ", ".join(UNITS[u].name[:8] for u in region.recruit_queue[:3]) or "None"
             gfx.draw_text(
                 surface,
                 f"Queue: {queue_preview}",
-                (info_rect.x + 4, info_rect.y + 64),
+                (info_rect.x + 4, info_rect.y + 84),
                 palette_name=palette,
             )
+            building_bits = []
+            for key in ORDERED_BUILDINGS:
+                level = region.buildings.get(key, 0)
+                if level:
+                    building_bits.append(f"{BUILDINGS[key].name[:6]} Lv{level}")
+            building_text = ", ".join(building_bits) if building_bits else "None"
+            gfx.draw_text(
+                surface,
+                f"Builds: {building_text}",
+                (info_rect.x + 4, info_rect.y + 94),
+                palette_name=palette,
+            )
+            if region.project:
+                building = BUILDINGS.get(region.project.building)
+                label = building.name if building else region.project.building
+                gfx.draw_text(
+                    surface,
+                    f"Project: {label} ({region.project.turns_left}t)",
+                    (info_rect.x + 4, info_rect.y + 104),
+                    palette_name=palette,
+                )
         self._draw_objectives(surface, palette)
         self._draw_advisor(surface, palette)
         self._draw_diplomacy_panel(surface, palette)
@@ -477,6 +579,14 @@ class CampaignScene(SceneBase):
             pygame.draw.circle(surface, gfx.get_palette(palette)[color_index], (x, y), 5)
             if self.selected_region == key and discovered:
                 pygame.draw.circle(surface, gfx.get_palette(palette)[25], (x, y), 7, 1)
+            if (
+                discovered
+                and self.state.regions[key].owner == PLAYER_FACTION
+                and self.state.regions[key].unsupplied_turns > 0
+            ):
+                colors = gfx.get_palette(palette)
+                pygame.draw.line(surface, colors[28], (x - 4, y - 4), (x + 4, y + 4), 1)
+                pygame.draw.line(surface, colors[28], (x - 4, y + 4), (x + 4, y - 4), 1)
             if key in highlight_targets:
                 pulse = (math.sin(self._highlight_time * 6.0) + 1.0) * 0.5
                 radius = 6 + int(2 * pulse)
@@ -590,7 +700,14 @@ class CampaignScene(SceneBase):
     def _refresh_advisor_tip(self) -> None:
         fac = self.state.factions[PLAYER_FACTION]
         new_tip = ""
-        if fac.treasury < 60:
+        cut_off = [
+            reg
+            for reg in self.state.regions_owned_by(PLAYER_FACTION)
+            if reg.unsupplied_turns > 0
+        ]
+        if cut_off:
+            new_tip = f"Reconnect supply to {REGIONS[cut_off[0].key].name}."
+        elif fac.treasury < 60:
             new_tip = "Treasury low. Secure income."
         elif not fac.research_queue:
             new_tip = "Queue research to stay ahead."

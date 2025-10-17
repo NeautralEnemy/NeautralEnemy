@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from core.state import GameState, Army
 from data.units import UNITS
@@ -36,13 +36,26 @@ class TacticalState:
     terrain: Dict[Tuple[int, int], str] = field(default_factory=dict)
     attacker_faction: str = ""
     defender_faction: str = ""
+    fort_level: int = 0
+    defender_supplied: bool = True
 
     def alive_units(self, side: int) -> List[TacticalUnit]:
         return [u for u in self.units if u.side == side and u.hp > 0]
 
 
-def setup_battle(game_state: GameState, attacker: Army, defender: Army, rng: random.Random) -> TacticalState:
+def setup_battle(
+    game_state: GameState,
+    attacker: Army,
+    defender: Army,
+    rng: random.Random,
+    location: Optional[str] = None,
+) -> TacticalState:
     units: List[TacticalUnit] = []
+    fort_level = 0
+    defender_supplied = True
+    if location and location in game_state.regions:
+        fort_level = game_state.regions[location].buildings.get("fort", 0)
+        defender_supplied = game_state.region_has_supply(defender.faction, location)
     for i, unit in enumerate(attacker.units):
         units.append(
             TacticalUnit(
@@ -55,18 +68,26 @@ def setup_battle(game_state: GameState, attacker: Army, defender: Army, rng: ran
             )
         )
     for i, unit in enumerate(defender.units):
+        base_hp = max(2, int(game_state.unit_defense_value(defender.faction, unit) / 2))
+        if fort_level:
+            base_hp += fort_level
+        morale = int(6 * game_state.factions[defender.faction].morale_modifier()) + defender.experience
+        if not defender_supplied:
+            morale = max(2, morale - 2)
         units.append(
             TacticalUnit(
                 side=1,
                 unit_type=unit,
-                hp=max(2, int(game_state.unit_defense_value(defender.faction, unit) / 2)),
-                morale=int(6 * game_state.factions[defender.faction].morale_modifier()) + defender.experience,
+                hp=base_hp,
+                morale=morale,
                 position=(BOARD_WIDTH - 2, 1 + i),
                 veterancy=defender.experience,
             )
         )
     terrain: Dict[Tuple[int, int], str] = {}
     features = ["forest", "forest", "hill", "fort"]
+    if fort_level:
+        features.extend(["fort"] * fort_level)
     for kind in features:
         for _ in range(4):
             pos = (rng.randint(1, BOARD_WIDTH - 2), rng.randint(0, BOARD_HEIGHT - 1))
@@ -80,6 +101,8 @@ def setup_battle(game_state: GameState, attacker: Army, defender: Army, rng: ran
         terrain=terrain,
         attacker_faction=attacker.faction,
         defender_faction=defender.faction,
+        fort_level=fort_level,
+        defender_supplied=defender_supplied,
     )
 
 
@@ -109,6 +132,8 @@ def _attack_roll(
         defense += 1
     if def_tile == "fort":
         defense += 2
+    if target.side == 1 and not state.defender_supplied:
+        defense = max(1, defense - 1)
     roll = rng.randint(1, int(base + 3))
     return roll > defense
 
@@ -144,9 +169,14 @@ def determine_winner(state: TacticalState) -> int:
     return -1
 
 
-def run_simulation(game_state: GameState, attacker: Army, defender: Army) -> int:
+def run_simulation(
+    game_state: GameState,
+    attacker: Army,
+    defender: Army,
+    location: Optional[str] = None,
+) -> int:
     rng = game_state.rng()
-    tactical = setup_battle(game_state, attacker, defender, rng)
+    tactical = setup_battle(game_state, attacker, defender, rng, location=location)
     winner = -1
     for _ in range(6):
         simulate_round(game_state, tactical, rng)

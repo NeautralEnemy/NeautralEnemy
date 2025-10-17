@@ -17,6 +17,9 @@ On first launch each script creates a project-local virtual environment, install
 - Control the British Empire and expand across Europe, the Americas, Africa, and India.
 - Each turn consists of **Recruit**, **Build**, **Research**, **Move**, and **End Turn** actions presented on the campaign HUD.
 - Regions generate income based on economy and stability; spend funds on units and infrastructure.
+- Maintain overland and naval **supply lines** from your capital—isolated regions lose stability, stall recruitment, and bleed armies to attrition.
+- Develop provinces with multi-turn **Market, Fort, and Culture** projects that deepen the economy, harden defenses, and recover order.
+- Fortified, well-supplied regions gain combat advantages in both auto-resolve and tactical clashes, while starving defenders crumble quickly.
 - Research three mini tech trees (Economy, Military, Naval) to unlock faction bonuses.
 - Manage diplomacy, trade, and public order through event messages. AI factions will recruit, move, and contest territory using simple heuristics.
 - Battles auto-resolve with morale-aware power calculations; tactical simulations are summarised via the log.

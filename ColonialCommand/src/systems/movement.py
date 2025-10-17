@@ -39,4 +39,7 @@ def reset_movement(state: GameState) -> None:
         if army.has_naval():
             base_speed = max(base_speed, 3)
             base_speed = base_speed * state.factions[army.faction].naval_modifier()
-        army.movement = max(1, min(4, int(round(base_speed))))
+        movement_allowance = max(1, min(4, int(round(base_speed))))
+        if not state.region_has_supply(army.faction, army.location):
+            movement_allowance = max(1, int(round(movement_allowance * 0.5)))
+        army.movement = movement_allowance

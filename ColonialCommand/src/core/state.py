@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import random
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from data.buildings import BUILDINGS, ORDERED_BUILDINGS, BuildingDef
 from data.factions import FACTIONS, MAJOR_FACTIONS
 from data.regions import (
     REGIONS,
@@ -45,6 +47,12 @@ class Army:
 
 
 @dataclass
+class ConstructionProject:
+    building: str
+    turns_left: int
+
+
+@dataclass
 class RegionState:
     key: str
     owner: str
@@ -54,6 +62,9 @@ class RegionState:
     garrison: List[str]
     discovered: bool = False
     recruit_queue: List[str] = field(default_factory=list)
+    buildings: Dict[str, int] = field(default_factory=dict)
+    project: Optional[ConstructionProject] = None
+    unsupplied_turns: int = 0
 
     def income(self) -> int:
         resource = REGIONS[self.key].resource
@@ -174,6 +185,10 @@ class GameState:
             stability = rng.uniform(0.6, 1.0)
             garrison = ["militia"]
             regions[key] = RegionState(key=key, owner=owner, population=population, economy=economy, stability=stability, garrison=garrison, discovered=(owner == "Britain"))
+            faction_def = FACTIONS.get(owner)
+            if faction_def and faction_def.capital == key:
+                regions[key].buildings["market"] = 1
+                regions[key].economy += 2
             i += 1
         armies = [Army(faction="Britain", location="london", units=["line", "line", "cavalry"])]
         fog = {fac: ["london"] for fac in factions}
@@ -229,8 +244,16 @@ class GameState:
                     continue
                 fac.diplomacy.relations.setdefault(other, "neutral")
                 fac.diplomacy.trade.setdefault(other, False)
-        regions = {
-            key: RegionState(
+        regions: Dict[str, RegionState] = {}
+        for key, reg in data["regions"].items():
+            project_data = reg.get("project")
+            project = None
+            if project_data:
+                project = ConstructionProject(
+                    building=project_data.get("building", "market"),
+                    turns_left=project_data.get("turns_left", 0),
+                )
+            regions[key] = RegionState(
                 key=key,
                 owner=reg["owner"],
                 population=reg["population"],
@@ -239,9 +262,10 @@ class GameState:
                 garrison=list(reg.get("garrison", [])),
                 discovered=reg.get("discovered", False),
                 recruit_queue=list(reg.get("recruit_queue", [])),
+                buildings=dict(reg.get("buildings", {})),
+                project=project,
+                unsupplied_turns=reg.get("unsupplied_turns", 0),
             )
-            for key, reg in data["regions"].items()
-        }
         armies = [
             Army(
                 faction=army["faction"],
@@ -347,7 +371,8 @@ class GameState:
 
     def apply_income(self, faction: str) -> int:
         fac_state = self.factions[faction]
-        income = int(sum(reg.income() for reg in self.regions_owned_by(faction)) * fac_state.income_modifier())
+        income_value = sum(self.region_income_value(reg) for reg in self.regions_owned_by(faction))
+        income = int(income_value * fac_state.income_modifier())
         try:
             from systems.diplomacy import trade_income_bonus
 
@@ -358,6 +383,163 @@ class GameState:
         fac_state.treasury += income - upkeep
         self.add_event(f"{faction} income {income} - upkeep {upkeep} = {income - upkeep}")
         return income - upkeep
+
+    def region_income_value(self, region: RegionState) -> int:
+        base = region.income()
+        base += region.buildings.get("market", 0) * 6
+        if region.project and region.project.building == "market":
+            base += 2
+        if not self.region_has_supply(region.owner, region.key):
+            base = int(base * 0.5)
+        return base
+
+    def region_has_supply(self, faction: str, region_key: str) -> bool:
+        if faction not in self.factions:
+            return True
+        capital = self.faction_capital(faction)
+        if not capital:
+            return True
+        if region_key == capital:
+            return True
+        owned_regions = self.regions_owned_by(faction)
+        owned = {reg.key for reg in owned_regions}
+        naval_resources = {"naval", "harbor", "trade", "corsairs"}
+        naval_regions = {reg.key for reg in owned_regions if REGIONS[reg.key].resource in naval_resources}
+        has_naval_supply = bool(
+            naval_regions and any(army.faction == faction and army.has_naval() for army in self.armies)
+        )
+        if region_key not in owned:
+            for neighbor in REGIONS[region_key].neighbors:
+                if neighbor not in owned:
+                    continue
+                if is_sea_lane(region_key, neighbor) and not has_naval_supply:
+                    continue
+                if self.region_has_supply(faction, neighbor):
+                    return True
+            if has_naval_supply and REGIONS[region_key].resource in naval_resources:
+                return True
+            return False
+        if capital not in owned:
+            return False
+        queue: deque[str] = deque([capital])
+        visited = {capital}
+        while queue:
+            current = queue.popleft()
+            if current == region_key:
+                return True
+            for neighbor in REGIONS[current].neighbors:
+                if neighbor in owned and neighbor not in visited and not is_sea_lane(current, neighbor):
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        if region_key in visited:
+            return True
+        if has_naval_supply and (
+            region_key in naval_regions or REGIONS[region_key].resource in naval_resources
+        ):
+            return True
+        return False
+
+    def available_buildings(self, region: RegionState) -> List[BuildingDef]:
+        options: List[BuildingDef] = []
+        for key in ORDERED_BUILDINGS:
+            building = BUILDINGS[key]
+            if region.buildings.get(key, 0) < building.max_level:
+                options.append(building)
+        return options
+
+    def start_construction(self, region: RegionState, building: BuildingDef) -> bool:
+        if region.project:
+            return False
+        if region.buildings.get(building.key, 0) >= building.max_level:
+            return False
+        if not self.region_has_supply(region.owner, region.key):
+            return False
+        faction = self.factions.get(region.owner)
+        if not faction:
+            return False
+        if faction.treasury < building.cost:
+            return False
+        faction.treasury -= building.cost
+        region.project = ConstructionProject(building=building.key, turns_left=building.build_time)
+        self.add_event(
+            f"{region.owner} began {building.name} in {REGIONS[region.key].name}"
+        )
+        return True
+
+    def process_construction(self) -> None:
+        for region in self.regions.values():
+            if not region.project:
+                continue
+            if not self.region_has_supply(region.owner, region.key):
+                if region.unsupplied_turns == 1:
+                    self.add_event(
+                        f"Construction stalled in {REGIONS[region.key].name} (cut off)"
+                    )
+                continue
+            region.project.turns_left -= 1
+            if region.project.turns_left <= 0:
+                building = BUILDINGS.get(region.project.building)
+                if building:
+                    region.buildings[building.key] = region.buildings.get(building.key, 0) + 1
+                    self.apply_building_effect(region, building)
+                    self.add_event(
+                        f"{region.owner} completed {building.name} in {REGIONS[region.key].name}"
+                    )
+                region.project = None
+
+    def apply_building_effect(self, region: RegionState, building: BuildingDef) -> None:
+        if building.key == "market":
+            region.economy += 2
+        elif building.key == "fort":
+            region.stability = min(1.3, region.stability + 0.03)
+        elif building.key == "culture":
+            region.stability = min(1.4, region.stability + 0.08)
+
+    def region_defense_bonus(self, region_key: str) -> int:
+        region = self.regions.get(region_key)
+        if not region:
+            return 0
+        return region.buildings.get("fort", 0) * 4
+
+    def apply_supply_attrition(self) -> None:
+        for region in self.regions.values():
+            if region.owner not in self.factions:
+                continue
+            supplied = self.region_has_supply(region.owner, region.key)
+            if supplied:
+                if region.unsupplied_turns > 0:
+                    self.add_event(f"Supply restored to {REGIONS[region.key].name}")
+                region.unsupplied_turns = 0
+                culture_level = region.buildings.get("culture", 0)
+                if culture_level and region.stability < 1.35:
+                    region.stability = min(1.35, region.stability + 0.02 * culture_level)
+                continue
+            region.unsupplied_turns += 1
+            penalty = 0.05 + 0.02 * max(0, region.unsupplied_turns - 1)
+            penalty = max(0.02, penalty - 0.01 * region.buildings.get("fort", 0))
+            region.stability = max(0.2, region.stability - penalty)
+            if region.unsupplied_turns % 2 == 0 and region.garrison:
+                lost = region.garrison.pop(0)
+                self.add_event(
+                    f"Garrison in {REGIONS[region.key].name} lost {UNITS[lost].name} to attrition"
+                )
+        for army in list(self.armies):
+            if army.faction not in self.factions:
+                continue
+            if self.region_has_supply(army.faction, army.location):
+                continue
+            if army.units:
+                lost = army.units.pop()
+                self.add_event(
+                    f"{army.faction} army in {REGIONS[army.location].name} lost {UNITS[lost].name} to attrition"
+                )
+                if not army.units:
+                    try:
+                        self.armies.remove(army)
+                    except ValueError:
+                        pass
+                    continue
+            army.experience = max(0, army.experience - 1)
 
     def apply_tech_bonus(self, faction: str, node: TechNode) -> None:
         fac = self.factions[faction]
@@ -478,12 +660,19 @@ class GameState:
 
     def process_recruitment(self) -> None:
         for region in self.regions.values():
-            if region.recruit_queue:
-                unit_key = region.recruit_queue.pop(0)
-                region.garrison.append(unit_key)
-                unit_name = UNITS[unit_key].name
-                region_name = REGIONS[region.key].name
-                self.add_event(f"{region.owner} raised {unit_name} in {region_name}")
+            if not region.recruit_queue:
+                continue
+            if not self.region_has_supply(region.owner, region.key):
+                if region.unsupplied_turns == 1:
+                    self.add_event(
+                        f"Recruitment stalled in {REGIONS[region.key].name} (cut off)"
+                    )
+                continue
+            unit_key = region.recruit_queue.pop(0)
+            region.garrison.append(unit_key)
+            unit_name = UNITS[unit_key].name
+            region_name = REGIONS[region.key].name
+            self.add_event(f"{region.owner} raised {unit_name} in {region_name}")
 
     # Narrative events --------------------------------------------------
 

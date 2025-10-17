@@ -1,11 +1,12 @@
 """Heuristic AI controller."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
-from core.state import GameState, Army
+from core.state import GameState, Army, RegionState
 from data.regions import REGIONS
 from data.units import UNITS
+from data.buildings import BuildingDef
 from . import movement, battle_auto
 
 
@@ -16,7 +17,40 @@ class AIController:
 
     def take_turn(self) -> None:
         self.recruit_if_needed()
+        self.build_infrastructure()
         self.perform_moves()
+
+    def build_infrastructure(self) -> None:
+        fac = self.state.factions[self.faction]
+        if fac.treasury < 60:
+            return
+        choice: Optional[tuple] = None
+        best_score = -999
+        for region in self.state.regions_owned_by(self.faction):
+            if region.project:
+                continue
+            if not self.state.region_has_supply(self.faction, region.key):
+                continue
+            options = self.state.available_buildings(region)
+            if not options:
+                continue
+            building = self._pick_building(region, options)
+            if fac.treasury < building.cost:
+                continue
+            frontier = len(self._find_adjacent_enemies(region.key))
+            score = region.economy + frontier * 10
+            if building.key == "fort":
+                score += 12 + frontier * 4
+            elif building.key == "culture":
+                score += int((1.0 - min(region.stability, 1.2)) * 40)
+            else:
+                score += 8 - region.buildings.get("market", 0) * 4
+            if score > best_score:
+                best_score = score
+                choice = (region, building)
+        if choice:
+            region, building = choice
+            self.state.start_construction(region, building)
 
     def recruit_if_needed(self) -> None:
         fac = self.state.factions[self.faction]
@@ -48,7 +82,9 @@ class AIController:
                 defender_key = enemies[0]
                 defender = self._get_region_garrison(defender_key)
                 if defender:
-                    result = battle_auto.resolve_auto(self.state, army, defender)
+                    result = battle_auto.resolve_auto(
+                        self.state, army, defender, location=defender.location
+                    )
                     if result.get("winner") == 1:
                         region = self.state.regions[defender_key]
                         region.owner = self.faction
@@ -76,7 +112,33 @@ class AIController:
         for neighbor in REGIONS[region_key].neighbors:
             if self.state.regions[neighbor].owner != self.faction:
                 enemies.append(neighbor)
+        enemies.sort(
+            key=lambda key: (
+                self.state.region_has_supply(self.state.regions[key].owner, key),
+                self.state.regions[key].stability,
+            )
+        )
         return enemies
+
+    def _pick_building(self, region: RegionState, options: List[BuildingDef]) -> BuildingDef:
+        building = options[0]
+        if region.stability < 0.75:
+            for opt in options:
+                if opt.key == "culture":
+                    building = opt
+                    break
+        frontier = self._find_adjacent_enemies(region.key)
+        if frontier:
+            for opt in options:
+                if opt.key == "fort":
+                    building = opt
+                    break
+        if building.key != "market":
+            for opt in options:
+                if opt.key == "market" and region.buildings.get("market", 0) == 0:
+                    building = opt
+                    break
+        return building
 
     def _get_region_garrison(self, region_key: str) -> Army | None:
         region = self.state.regions[region_key]

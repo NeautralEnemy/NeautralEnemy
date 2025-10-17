@@ -1,7 +1,7 @@
 """Auto resolve battles."""
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 from core.state import GameState, Army
 
@@ -10,11 +10,21 @@ class BattleResult(Dict[str, int]):
     pass
 
 
-def resolve_auto(state: GameState, attacker: Army, defender: Army) -> BattleResult:
+def resolve_auto(
+    state: GameState,
+    attacker: Army,
+    defender: Army,
+    location: Optional[str] = None,
+) -> BattleResult:
+    location = location or defender.location
     atk_power = sum(state.unit_attack_value(attacker.faction, u) for u in attacker.units) + attacker.experience * 2
     def_power = sum(state.unit_defense_value(defender.faction, u) for u in defender.units) + defender.experience * 2
     atk_score = atk_power
     def_score = def_power
+    if location:
+        def_score += state.region_defense_bonus(location)
+        if not state.region_has_supply(defender.faction, location):
+            def_score = int(def_score * 0.9)
     rng = state.rng()
     atk_roll = atk_score * (0.8 + rng.random() * 0.4)
     def_roll = def_score * (0.8 + rng.random() * 0.4)
